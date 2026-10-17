@@ -6,6 +6,7 @@
 //! LIB/events/<id>/headline.json          the headline (see [`Headline`])
 //! LIB/events/<id>/snapshots.json.gz      engine intervals for the event span, for nemcf-wasm
 //! LIB/events/<id>/scenarios/<name>.json  the scenarios run, as starting points
+//! LIB/events/<id>/scenarios/index.json   {schema, scenarios:[{name, file}]}, headline order
 //! LIB/events/<id>/manifest.json          the bundle manifest: AEMO sources and hashes
 //! ```
 //!
@@ -42,7 +43,8 @@ Headline results and replay inputs for NEM price events detected by
   price and each scenario's change in mean price, over the event span.
 - `events/<id>/snapshots.json.gz`: the engine's intervals for the event span,
   for running scenarios in the browser.
-- `events/<id>/scenarios/`: the scenarios run.
+- `events/<id>/scenarios/`: the scenarios run; `index.json` lists each
+  name and file, in headline order.
 - `events/<id>/manifest.json`: the AEMO source files and their SHA-256.
 
 Times are interval ends in market time with the offset
@@ -304,8 +306,12 @@ pub fn add(inputs: &Inputs, lib: &Path) -> Result<Headline> {
 }
 
 /// Copy the scenario files whose `name` was published.
+/// The browser cannot list a folder, so scenarios/index.json names each
+/// file, in headline order. A name in several files takes the first by file
+/// name, as nemcf does.
 fn copy_scenarios(src: &Path, dst: &Path, published: &[ScenarioHeadline]) -> Result<()> {
     let names: BTreeSet<&str> = published.iter().map(|s| s.name.as_str()).collect();
+    let mut files: BTreeMap<String, String> = BTreeMap::new();
     let mut entries: Vec<PathBuf> = fs::read_dir(src)
         .with_context(|| format!("reading {}", src.display()))?
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -320,15 +326,51 @@ fn copy_scenarios(src: &Path, dst: &Path, published: &[ScenarioHeadline]) -> Res
             Some(v) => v,
             None => continue,
         };
-        if v.get("name")
-            .and_then(|n| n.as_str())
-            .is_some_and(|n| names.contains(n))
-        {
+        let Some(name) = v.get("name").and_then(|n| n.as_str()) else {
+            continue;
+        };
+        let file = p
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        if names.contains(name) && !files.contains_key(name) {
             fs::create_dir_all(dst)?;
-            fs::copy(&p, dst.join(p.file_name().unwrap_or_default()))?;
+            fs::copy(&p, dst.join(&file))?;
+            files.insert(name.to_string(), file);
         }
     }
-    Ok(())
+    if files.is_empty() {
+        return Ok(());
+    }
+    let list: Vec<ScenarioFile> = published
+        .iter()
+        .filter_map(|s| {
+            files.get(&s.name).map(|f| ScenarioFile {
+                name: s.name.clone(),
+                file: f.clone(),
+            })
+        })
+        .collect();
+    write_json(
+        &dst.join("index.json"),
+        &ScenarioIndex {
+            schema: SCHEMA,
+            scenarios: list,
+        },
+    )
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ScenarioIndex {
+    pub schema: u32,
+    pub scenarios: Vec<ScenarioFile>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ScenarioFile {
+    pub name: String,
+    pub file: String,
 }
 
 /// Rebuild index.json from every events/<id>/headline.json, newest first.
@@ -458,6 +500,38 @@ mod tests {
         let ids: Vec<&str> = idx.events.iter().map(|e| e.event_id.as_str()).collect();
         assert_eq!(ids, ["b", "a"]);
         fs::remove_dir_all(&lib).unwrap();
+    }
+
+    #[test]
+    fn scenario_index_follows_headline_order() {
+        let root = std::env::temp_dir().join(format!("nem-lib-sc-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let (src, dst) = (root.join("src"), root.join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        for (file, name) in [
+            ("a.json", "zeta"),
+            ("b.json", "alpha"),
+            ("c.json", "alpha"),
+            ("d.json", "not run"),
+        ] {
+            fs::write(src.join(file), format!(r#"{{"name":"{name}","ops":[]}}"#)).unwrap();
+        }
+        fs::write(src.join("bad.json"), "{").unwrap();
+        let published = ["alpha", "zeta"].map(|n| ScenarioHeadline {
+            name: n.into(),
+            mean_price_change: 0.0,
+        });
+        copy_scenarios(&src, &dst, &published).unwrap();
+        let idx: ScenarioIndex =
+            serde_json::from_str(&fs::read_to_string(dst.join("index.json")).unwrap()).unwrap();
+        let got: Vec<(&str, &str)> = idx
+            .scenarios
+            .iter()
+            .map(|s| (s.name.as_str(), s.file.as_str()))
+            .collect();
+        assert_eq!(got, [("alpha", "b.json"), ("zeta", "a.json")]);
+        assert!(!dst.join("c.json").exists() && !dst.join("d.json").exists());
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
