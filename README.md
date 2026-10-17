@@ -46,6 +46,7 @@ nem-monitor -c config.toml mark-data-ready 2026-10-12 [--triggers] [--files DIR]
 nem-monitor -c config.toml prune                                  # trim the 48-hour buffer now
 nem-monitor bundle add-static bundles/EVENT_ID --mmsdm DIR        # add MMSDM equations to a bundle
 nem-monitor -c pages.toml once --state-in URL --site-out site/    # static site (GitHub Pages)
+nem-monitor library add bundles/EVENT_ID --out LIB --scenarios DIR  # publish a replayed event
 ```
 
 Try it offline with the synthetic fixture (shaped on the reported 12 October 2026 NSW event; not AEMO data):
@@ -78,6 +79,17 @@ The monitor stores event data only; AEMO's NEMWeb and MMSDM archives stay the gr
 - `manifest.json`: every AEMO source file with its URL and SHA-256, every output with its rows and SHA-256, and any equations not found.
 
 Query bundles with DuckDB; examples in [docs/duckdb-queries.md](docs/duckdb-queries.md). `scripts/bundle_check.py` re-verifies a bundle's hashes and figures.
+
+## Event library
+
+`nem-monitor library add BUNDLE --out LIB --scenarios DIR` publishes a replayed event into the public library ([nem-lens/library](https://github.com/nem-lens/library), served on GitHub Pages), where the browser runs scenarios with nemcf-wasm. It reads `BUNDLE/replay/prices.csv` and the nemcf snapshots, and writes:
+
+- `index.json`: every event's headline, newest first;
+- `events/<id>/headline.json`: peak price, duration, the baseline replay's mean price and each scenario's change in mean price, all over the event span (intervals ending from the event's start to its end, in its region);
+- `events/<id>/snapshots.json.gz`: the engine's intervals for the event span (2.2 MB for 12 Oct);
+- `events/<id>/scenarios/`: the scenarios replayed, and `manifest.json`: the AEMO sources and hashes.
+
+Only the headline fields are published from the replay; everything else the engine writes stays with the bundle.
 
 ## Triggers (running the rest of the pipeline)
 
@@ -146,6 +158,7 @@ src/store.rs      SQLite
 src/ingest.rs     poll loop, replay, raw buffer, bundle scheduling
 src/bundle.rs     event bundles: Parquet, manifest, MMSDM slices
 src/site.rs       static site and state for GitHub Pages (`once`)
+src/library.rs    the public event library (headlines and browser inputs)
 static/index.html the public page, server or static mode (no external dependencies)
 ```
 

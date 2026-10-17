@@ -6,6 +6,7 @@
 //!   nem-monitor -c config.toml mark-data-ready DAY [--files DIR]   record next-day data
 //!   nem-monitor -c config.toml prune           trim the rolling buffer
 //!   nem-monitor -c config.toml once --state-in URL --site-out site/   static site (GitHub Pages)
+//!   nem-monitor library add BUNDLE --out LIB    publish a replayed event to the library
 //!   nem-monitor -c config.toml check-config
 
 mod app;
@@ -14,6 +15,7 @@ mod config;
 mod detect;
 mod feeds;
 mod ingest;
+mod library;
 mod model;
 mod nemweb;
 mod notify;
@@ -98,8 +100,34 @@ enum Cmd {
         #[arg(long, value_name = "DIR")]
         replay: Option<PathBuf>,
     },
+    /// Public event library (headline results and browser inputs).
+    Library {
+        #[command(subcommand)]
+        cmd: LibraryCmd,
+    },
     /// Validate the configuration and exit.
     CheckConfig,
+}
+
+#[derive(Subcommand)]
+enum LibraryCmd {
+    /// Publish a replayed event into the library and rebuild its index.
+    Add {
+        /// The bundle directory, e.g. bundles/202610121420-NSW1-high.
+        bundle: PathBuf,
+        /// The library directory (a checkout of nem-lens/library).
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
+        /// nemcf replay output with prices.csv [default: BUNDLE/replay].
+        #[arg(long, value_name = "DIR")]
+        replay: Option<PathBuf>,
+        /// nemcf snapshots file [default: REPLAY/snapshots.json].
+        #[arg(long, value_name = "FILE")]
+        snapshots: Option<PathBuf>,
+        /// Scenario files to publish alongside (those that were replayed).
+        #[arg(long, value_name = "DIR")]
+        scenarios: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -266,6 +294,41 @@ async fn main() -> Result<()> {
                     "  … and {} more (see manifest.json)",
                     s.missing_equations.len() - 10
                 );
+            }
+            Ok(())
+        }
+        Cmd::Library {
+            cmd:
+                LibraryCmd::Add {
+                    bundle,
+                    out,
+                    replay,
+                    snapshots,
+                    scenarios,
+                },
+        } => {
+            let replay = replay.unwrap_or_else(|| bundle.join("replay"));
+            let h = library::add(
+                &library::Inputs {
+                    bundle: &bundle,
+                    replay: &replay,
+                    snapshots: snapshots.as_deref(),
+                    scenarios: scenarios.as_deref(),
+                },
+                &out,
+            )?;
+            println!(
+                "{}: {} {} to {}, peak ${:.0}, baseline mean ${:.0}, {} scenarios",
+                h.event_id,
+                h.region,
+                h.start,
+                h.end,
+                h.peak_price,
+                h.baseline_mean_price,
+                h.scenarios.len()
+            );
+            for s in &h.scenarios {
+                println!("  {}: {:+.0} $/MWh", s.name, s.mean_price_change);
             }
             Ok(())
         }
