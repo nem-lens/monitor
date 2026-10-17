@@ -18,9 +18,7 @@ Deploying adds no commits, so the repository does not grow.
      `Alerts`. Create it first (**Discussions → categories**) as an
      announcement-type category, so only maintainers and the workflow can
      start threads.
-4. While `nem-lens/aemo` is private, add a secret `NEM_LENS_READ_TOKEN` with
-   read access to it.
-5. Run **Actions → Pages → Run workflow** once. The first run finds no
+4. Run **Actions → Pages → Run workflow** once. The first run finds no
    previous state and starts fresh; later runs continue from
    `<site>/data/state.json`.
 
