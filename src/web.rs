@@ -24,7 +24,10 @@ use crate::webhooks::{self, ApiError, RegisterReq};
 const INDEX: &str = include_str!("../static/index.html");
 
 pub fn router(app: App) -> Router {
-    let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
     Router::new()
         .route("/", get(index))
         .route("/healthz", get(healthz))
@@ -56,16 +59,25 @@ fn internal(e: anyhow::Error) -> ApiError {
 }
 
 async fn index(State(app): State<App>) -> Html<String> {
-    Html(INDEX.replace("{{SITE_TITLE}}", &feeds::xml_escape(&app.cfg.public.site_title)))
+    Html(INDEX.replace(
+        "{{SITE_TITLE}}",
+        &feeds::xml_escape(&app.cfg.public.site_title),
+    ))
 }
 
 async fn healthz(State(app): State<App>) -> Response {
     let h = app.health.read().map(|h| h.clone()).unwrap_or_default();
     let fresh = match h.mode.as_str() {
-        "live" => h.last_poll_ok.is_some_and(|t| (chrono::Utc::now() - t).num_minutes() < 10),
+        "live" => h
+            .last_poll_ok
+            .is_some_and(|t| (chrono::Utc::now() - t).num_minutes() < 10),
         _ => true,
     };
-    let code = if fresh { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+    let code = if fresh {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
     (code, Json(h)).into_response()
 }
 
@@ -138,7 +150,10 @@ struct EventsQuery {
     limit: Option<usize>,
 }
 
-async fn events(State(app): State<App>, Query(q): Query<EventsQuery>) -> Result<Json<serde_json::Value>, ApiError> {
+async fn events(
+    State(app): State<App>,
+    Query(q): Query<EventsQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
     let list = app
         .with_db(|c| {
             store::list_events(
@@ -155,21 +170,38 @@ async fn events(State(app): State<App>, Query(q): Query<EventsQuery>) -> Result<
     Ok(Json(serde_json::json!({ "events": list })))
 }
 
-async fn event_detail(State(app): State<App>, Path(id): Path<String>) -> Result<Json<serde_json::Value>, ApiError> {
+async fn event_detail(
+    State(app): State<App>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
     let out = app
         .with_db(|c| {
-            let Some(ev) = store::get_event(c, &id)? else { return Ok(None) };
+            let Some(ev) = store::get_event(c, &id)? else {
+                return Ok(None);
+            };
             if ev.status == crate::model::Status::Discarded {
                 return Ok(None);
             }
             let start = ev.start_time().unwrap_or_default() - chrono::Duration::hours(1);
-            let end = ev.end_time().or_else(|| ev.last_active_time()).unwrap_or_default() + chrono::Duration::hours(1);
-            let series = store::series(c, &ev.region, &crate::time::iso_market(start), &crate::time::iso_market(end))?;
+            let end = ev
+                .end_time()
+                .or_else(|| ev.last_active_time())
+                .unwrap_or_default()
+                + chrono::Duration::hours(1);
+            let series = store::series(
+                c,
+                &ev.region,
+                &crate::time::iso_market(start),
+                &crate::time::iso_market(end),
+            )?;
             let notes = store::notifications_for_event(c, &id, true)?;
-            Ok(Some(serde_json::json!({ "event": ev, "series": series, "notifications": notes })))
+            Ok(Some(
+                serde_json::json!({ "event": ev, "series": series, "notifications": notes }),
+            ))
         })
         .map_err(internal)?;
-    out.map(Json).ok_or_else(|| ApiError(404, "event not found".into()))
+    out.map(Json)
+        .ok_or_else(|| ApiError(404, "event not found".into()))
 }
 
 #[derive(Deserialize)]
@@ -178,29 +210,52 @@ struct NotesQuery {
     limit: Option<usize>,
 }
 
-async fn notifications(State(app): State<App>, Query(q): Query<NotesQuery>) -> Result<Json<serde_json::Value>, ApiError> {
+async fn notifications(
+    State(app): State<App>,
+    Query(q): Query<NotesQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
     let items = app
-        .with_db(|c| store::list_notifications(c, true, q.since.unwrap_or(0), q.limit.unwrap_or(50)))
+        .with_db(|c| {
+            store::list_notifications(c, true, q.since.unwrap_or(0), q.limit.unwrap_or(50))
+        })
         .map_err(internal)?;
     Ok(Json(serde_json::json!({ "notifications": items })))
 }
 
-async fn stream(State(app): State<App>) -> Sse<impl futures_util::Stream<Item = Result<SseEvent, Infallible>>> {
+async fn stream(
+    State(app): State<App>,
+) -> Sse<impl futures_util::Stream<Item = Result<SseEvent, Infallible>>> {
     let rx = app.tx.subscribe();
     let s = BroadcastStream::new(rx).filter_map(|m| {
-        m.ok().map(|msg| Ok(SseEvent::default().event(msg.kind).json_data(msg.data).unwrap_or_default()))
+        m.ok().map(|msg| {
+            Ok(SseEvent::default()
+                .event(msg.kind)
+                .json_data(msg.data)
+                .unwrap_or_default())
+        })
     });
     Sse::new(s).keep_alive(KeepAlive::default())
 }
 
 async fn atom(State(app): State<App>) -> Result<Response, ApiError> {
-    let items = app.with_db(|c| store::list_notifications(c, true, 0, app.cfg.public.feed_items)).map_err(internal)?;
-    Ok(([(header::CONTENT_TYPE, "application/atom+xml; charset=utf-8")], feeds::atom(&items, &app.cfg)).into_response())
+    let items = app
+        .with_db(|c| store::list_notifications(c, true, 0, app.cfg.public.feed_items))
+        .map_err(internal)?;
+    Ok((
+        [(header::CONTENT_TYPE, "application/atom+xml; charset=utf-8")],
+        feeds::atom(&items, &app.cfg),
+    )
+        .into_response())
 }
 
 async fn json_feed(State(app): State<App>) -> Result<Response, ApiError> {
-    let items = app.with_db(|c| store::list_notifications(c, true, 0, app.cfg.public.feed_items)).map_err(internal)?;
-    Ok(([(header::CONTENT_TYPE, "application/feed+json; charset=utf-8")], Json(feeds::json_feed(&items, &app.cfg)))
+    let items = app
+        .with_db(|c| store::list_notifications(c, true, 0, app.cfg.public.feed_items))
+        .map_err(internal)?;
+    Ok((
+        [(header::CONTENT_TYPE, "application/feed+json; charset=utf-8")],
+        Json(feeds::json_feed(&items, &app.cfg)),
+    )
         .into_response())
 }
 
@@ -237,34 +292,55 @@ async fn register_webhook(
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
-async fn delete_webhook(State(app): State<App>, Path(id): Path<String>, headers: HeaderMap) -> Result<StatusCode, ApiError> {
+async fn delete_webhook(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
     let token = bearer(&headers).ok_or_else(|| ApiError(401, "missing bearer token".into()))?;
     webhooks::authorise(&app, &id, &token)?;
-    app.with_db(|c| store::delete_webhook(c, &id)).map_err(internal)?;
+    app.with_db(|c| store::delete_webhook(c, &id))
+        .map_err(internal)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn test_webhook(State(app): State<App>, Path(id): Path<String>, headers: HeaderMap) -> Result<Json<serde_json::Value>, ApiError> {
+async fn test_webhook(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
     let token = bearer(&headers).ok_or_else(|| ApiError(401, "missing bearer token".into()))?;
     webhooks::authorise(&app, &id, &token)?;
     let hook = app
         .with_db(|c| store::get_webhook(c, &id))
         .map_err(internal)?
         .ok_or_else(|| ApiError(409, "subscription is disabled".into()))?;
-    let latest = app.with_db(|c| store::list_notifications(c, true, 0, 1)).map_err(internal)?;
-    let item = latest.into_iter().next().ok_or_else(|| ApiError(409, "no notifications yet to send as a test".into()))?;
+    let latest = app
+        .with_db(|c| store::list_notifications(c, true, 0, 1))
+        .map_err(internal)?;
+    let item = latest
+        .into_iter()
+        .next()
+        .ok_or_else(|| ApiError(409, "no notifications yet to send as a test".into()))?;
     match webhooks::deliver(&app, &hook, &item, "test").await {
         Ok(()) => Ok(Json(serde_json::json!({ "delivered": true }))),
         Err(e) => Err(ApiError(502, format!("delivery failed: {e}"))),
     }
 }
 
-async fn admin_runs(State(app): State<App>, headers: HeaderMap) -> Result<Json<serde_json::Value>, ApiError> {
-    let expected = std::env::var("NEM_ADMIN_TOKEN").ok().filter(|s| s.len() >= 16);
+async fn admin_runs(
+    State(app): State<App>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let expected = std::env::var("NEM_ADMIN_TOKEN")
+        .ok()
+        .filter(|s| s.len() >= 16);
     match (expected, bearer(&headers)) {
         (Some(e), Some(t)) if webhooks::sha256_hex(&e) == webhooks::sha256_hex(&t) => {}
         _ => return Err(ApiError(404, "not found".into())),
     }
-    let runs = app.with_db(|c| store::list_runs(c, 100)).map_err(internal)?;
+    let runs = app
+        .with_db(|c| store::list_runs(c, 100))
+        .map_err(internal)?;
     Ok(Json(serde_json::json!({ "runs": runs })))
 }

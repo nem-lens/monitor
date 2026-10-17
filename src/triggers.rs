@@ -18,7 +18,9 @@ use crate::store;
 pub fn matches(t: &TriggerCfg, item: &NotificationItem) -> bool {
     t.on.iter().any(|o| o == &item.transition)
         && crate::notify::severity_meets(&item.event, t.min_severity.as_deref())
-        && t.regions.as_ref().is_none_or(|r| r.contains(&item.event.region))
+        && t.regions
+            .as_ref()
+            .is_none_or(|r| r.contains(&item.event.region))
 }
 
 pub fn substitute(arg: &str, item: &NotificationItem) -> String {
@@ -45,7 +47,9 @@ pub fn fire(app: &App, item: &NotificationItem) {
 }
 
 async fn run(app: &App, t: &TriggerCfg, item: &NotificationItem) {
-    let run_id = app.with_db(|c| store::start_run(c, &t.name, &item.event_id, &item.transition)).ok();
+    let run_id = app
+        .with_db(|c| store::start_run(c, &t.name, &item.event_id, &item.transition))
+        .ok();
     let (code, tail) = if let Some(argv) = &t.command {
         run_command(argv, t.timeout_secs, item).await
     } else if let Some(url) = &t.webhook {
@@ -64,7 +68,11 @@ fn tail(s: &str, n: usize) -> String {
     chars[chars.len().saturating_sub(n)..].iter().collect()
 }
 
-pub async fn run_command(argv: &[String], timeout_secs: u64, item: &NotificationItem) -> (Option<i32>, String) {
+pub async fn run_command(
+    argv: &[String],
+    timeout_secs: u64,
+    item: &NotificationItem,
+) -> (Option<i32>, String) {
     let Some((prog, args)) = argv.split_first() else {
         return (None, "empty command".into());
     };
@@ -94,7 +102,11 @@ pub async fn run_command(argv: &[String], timeout_secs: u64, item: &Notification
     }
     match tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await {
         Ok(Ok(out)) => {
-            let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
             (out.status.code(), tail(&text, 4000))
         }
         Ok(Err(e)) => (None, format!("wait failed: {e}")),
@@ -102,15 +114,30 @@ pub async fn run_command(argv: &[String], timeout_secs: u64, item: &Notification
     }
 }
 
-async fn run_webhook(app: &App, url: &str, secret_env: Option<&str>, item: &NotificationItem) -> (Option<i32>, String) {
+async fn run_webhook(
+    app: &App,
+    url: &str,
+    secret_env: Option<&str>,
+    item: &NotificationItem,
+) -> (Option<i32>, String) {
     let body = serde_json::to_string(item).unwrap_or_default();
     let ts = chrono::Utc::now().timestamp();
-    let mut req = app.http.post(url).header("content-type", "application/json").header("x-nem-timestamp", ts.to_string());
+    let mut req = app
+        .http
+        .post(url)
+        .header("content-type", "application/json")
+        .header("x-nem-timestamp", ts.to_string());
     if let Some(secret) = secret_env.and_then(|k| std::env::var(k).ok()) {
-        req = req.header("x-nem-signature", format!("sha256={}", crate::webhooks::sign(&secret, ts, &body)));
+        req = req.header(
+            "x-nem-signature",
+            format!("sha256={}", crate::webhooks::sign(&secret, ts, &body)),
+        );
     }
     match req.body(body).send().await {
-        Ok(r) => (Some(r.status().as_u16() as i32), tail(&r.text().await.unwrap_or_default(), 2000)),
+        Ok(r) => (
+            Some(r.status().as_u16() as i32),
+            tail(&r.text().await.unwrap_or_default(), 2000),
+        ),
         Err(e) => (None, e.to_string()),
     }
 }
@@ -146,10 +173,15 @@ mod tests {
 
     #[tokio::test]
     async fn runs_command_with_stdin_env_and_placeholders() {
-        let argv: Vec<String> = ["sh", "-c", "echo arg=$0 env=$NEM_REGION; head -c 20", "{event_id}"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let argv: Vec<String> = [
+            "sh",
+            "-c",
+            "echo arg=$0 env=$NEM_REGION; head -c 20",
+            "{event_id}",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         let (code, out) = run_command(&argv, 10, &item()).await;
         assert_eq!(code, Some(0));
         assert!(out.contains("arg=202610121410-NSW1-high env=NSW1"), "{out}");

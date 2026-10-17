@@ -47,9 +47,13 @@ fn now() -> String {
 }
 
 pub fn is_seen(c: &Connection, name: &str) -> Result<bool> {
-    Ok(c.query_row("SELECT 1 FROM seen_files WHERE name = ?1", [name], |_| Ok(()))
+    Ok(
+        c.query_row("SELECT 1 FROM seen_files WHERE name = ?1", [name], |_| {
+            Ok(())
+        })
         .optional()?
-        .is_some())
+        .is_some(),
+    )
 }
 
 pub fn mark_seen(c: &Connection, name: &str, kind: &str) -> Result<()> {
@@ -65,7 +69,14 @@ pub fn save_snapshot(c: &Connection, s: &DispatchSnapshot) -> Result<()> {
     for (region, r) in &s.regions {
         c.execute(
             "INSERT OR REPLACE INTO region_intervals VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![t, region, r.rrp, r.demand, r.available_gen, r.net_interchange],
+            params![
+                t,
+                region,
+                r.rrp,
+                r.demand,
+                r.available_gen,
+                r.net_interchange
+            ],
         )?;
     }
     Ok(())
@@ -84,7 +95,11 @@ pub fn series(c: &Connection, region: &str, from: &str, to: &str) -> Result<Vec<
          WHERE region = ?1 AND settlement >= ?2 AND settlement <= ?3 ORDER BY settlement",
     )?;
     let rows = st.query_map(params![region, from, to], |r| {
-        Ok(SeriesPoint { t: r.get(0)?, rrp: r.get(1)?, demand: r.get(2)? })
+        Ok(SeriesPoint {
+            t: r.get(0)?,
+            rrp: r.get(1)?,
+            demand: r.get(2)?,
+        })
     })?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
@@ -95,7 +110,11 @@ pub fn recent_series(c: &Connection, region: &str, n: usize) -> Result<Vec<Serie
          ORDER BY settlement DESC LIMIT ?2",
     )?;
     let rows = st.query_map(params![region, n as i64], |r| {
-        Ok(SeriesPoint { t: r.get(0)?, rrp: r.get(1)?, demand: r.get(2)? })
+        Ok(SeriesPoint {
+            t: r.get(0)?,
+            rrp: r.get(1)?,
+            demand: r.get(2)?,
+        })
     })?;
     let mut v: Vec<SeriesPoint> = rows.collect::<std::result::Result<_, _>>()?;
     v.reverse();
@@ -103,7 +122,11 @@ pub fn recent_series(c: &Connection, region: &str, n: usize) -> Result<Vec<Serie
 }
 
 pub fn latest_settlement(c: &Connection) -> Result<Option<String>> {
-    Ok(c.query_row("SELECT MAX(settlement) FROM region_intervals", [], |r| r.get(0))?)
+    Ok(
+        c.query_row("SELECT MAX(settlement) FROM region_intervals", [], |r| {
+            r.get(0)
+        })?,
+    )
 }
 
 pub fn upsert_event(c: &Connection, e: &Event) -> Result<()> {
@@ -130,8 +153,9 @@ pub fn upsert_event(c: &Connection, e: &Event) -> Result<()> {
 }
 
 pub fn get_event(c: &Connection, id: &str) -> Result<Option<Event>> {
-    let json: Option<String> =
-        c.query_row("SELECT json FROM events WHERE id = ?1", [id], |r| r.get(0)).optional()?;
+    let json: Option<String> = c
+        .query_row("SELECT json FROM events WHERE id = ?1", [id], |r| r.get(0))
+        .optional()?;
     Ok(match json {
         Some(j) => Some(serde_json::from_str(&j)?),
         None => None,
@@ -161,7 +185,9 @@ pub fn list_events(c: &Connection, f: &EventFilter) -> Result<Vec<Event>> {
     }
     sql.push_str(&format!(" ORDER BY start DESC LIMIT {}", f.limit.min(500)));
     let mut st = c.prepare(&sql)?;
-    let rows = st.query_map(rusqlite::params_from_iter(args.iter()), |r| r.get::<_, String>(0))?;
+    let rows = st.query_map(rusqlite::params_from_iter(args.iter()), |r| {
+        r.get::<_, String>(0)
+    })?;
     let mut out = Vec::new();
     for j in rows {
         out.push(serde_json::from_str(&j?)?);
@@ -191,15 +217,26 @@ pub fn add_notification(c: &Connection, item: &NotificationItem) -> Result<i64> 
     let seq = c.last_insert_rowid();
     let mut stored = item.clone();
     stored.seq = seq;
-    c.execute("UPDATE notifications SET json = ?1 WHERE seq = ?2", params![serde_json::to_string(&stored)?, seq])?;
+    c.execute(
+        "UPDATE notifications SET json = ?1 WHERE seq = ?2",
+        params![serde_json::to_string(&stored)?, seq],
+    )?;
     Ok(seq)
 }
 
-pub fn list_notifications(c: &Connection, public_only: bool, since: i64, limit: usize) -> Result<Vec<NotificationItem>> {
+pub fn list_notifications(
+    c: &Connection,
+    public_only: bool,
+    since: i64,
+    limit: usize,
+) -> Result<Vec<NotificationItem>> {
     let mut st = c.prepare(
         "SELECT json FROM notifications WHERE (?1 = 0 OR public = 1) AND seq > ?2 ORDER BY seq DESC LIMIT ?3",
     )?;
-    let rows = st.query_map(params![public_only as i64, since, limit.min(500) as i64], |r| r.get::<_, String>(0))?;
+    let rows = st.query_map(
+        params![public_only as i64, since, limit.min(500) as i64],
+        |r| r.get::<_, String>(0),
+    )?;
     let mut out = Vec::new();
     for j in rows {
         out.push(serde_json::from_str(&j?)?);
@@ -208,12 +245,20 @@ pub fn list_notifications(c: &Connection, public_only: bool, since: i64, limit: 
 }
 
 pub fn save_state(c: &Connection, json: &str) -> Result<()> {
-    c.execute("INSERT OR REPLACE INTO detector_state (id, json) VALUES (1, ?1)", [json])?;
+    c.execute(
+        "INSERT OR REPLACE INTO detector_state (id, json) VALUES (1, ?1)",
+        [json],
+    )?;
     Ok(())
 }
 
 pub fn load_state(c: &Connection) -> Result<Option<String>> {
-    Ok(c.query_row("SELECT json FROM detector_state WHERE id = 1", [], |r| r.get(0)).optional()?)
+    Ok(
+        c.query_row("SELECT json FROM detector_state WHERE id = 1", [], |r| {
+            r.get(0)
+        })
+        .optional()?,
+    )
 }
 
 /// Record a daily file; returns true when it is new.
@@ -230,18 +275,30 @@ pub fn latest_complete_day(c: &Connection, sources: &[String]) -> Result<Option<
     if sources.is_empty() {
         return Ok(None);
     }
-    let placeholders = (1..=sources.len()).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",");
+    let placeholders = (1..=sources.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
     let sql = format!(
         "SELECT trading_day FROM data_ready WHERE source IN ({placeholders})
          GROUP BY trading_day HAVING COUNT(DISTINCT source) = {} ORDER BY trading_day DESC LIMIT 1",
         sources.len()
     );
-    Ok(c.query_row(&sql, rusqlite::params_from_iter(sources.iter()), |r| r.get(0)).optional()?)
+    Ok(
+        c.query_row(&sql, rusqlite::params_from_iter(sources.iter()), |r| {
+            r.get(0)
+        })
+        .optional()?,
+    )
 }
 
 pub fn prune(c: &Connection, retain_days: i64) -> Result<()> {
-    let cutoff = crate::time::iso_market(crate::time::now_market() - chrono::Duration::days(retain_days));
-    c.execute("DELETE FROM region_intervals WHERE settlement < ?1", [&cutoff])?;
+    let cutoff =
+        crate::time::iso_market(crate::time::now_market() - chrono::Duration::days(retain_days));
+    c.execute(
+        "DELETE FROM region_intervals WHERE settlement < ?1",
+        [&cutoff],
+    )?;
     c.execute("DELETE FROM seen_files WHERE processed_at < ?1", [&cutoff])?;
     Ok(())
 }
@@ -260,7 +317,11 @@ pub struct Webhook {
 }
 
 pub fn count_webhooks(c: &Connection) -> Result<usize> {
-    Ok(c.query_row("SELECT COUNT(*) FROM webhooks WHERE status = 'active'", [], |r| r.get::<_, i64>(0))? as usize)
+    Ok(c.query_row(
+        "SELECT COUNT(*) FROM webhooks WHERE status = 'active'",
+        [],
+        |r| r.get::<_, i64>(0),
+    )? as usize)
 }
 
 pub fn insert_webhook(
@@ -305,8 +366,12 @@ pub fn active_webhooks(c: &Connection) -> Result<Vec<Webhook>> {
 }
 
 pub fn get_webhook_manage_hash(c: &Connection, id: &str) -> Result<Option<(String, String)>> {
-    Ok(c.query_row("SELECT manage_hash, status FROM webhooks WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))
-        .optional()?)
+    Ok(c.query_row(
+        "SELECT manage_hash, status FROM webhooks WHERE id = ?1",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()?)
 }
 
 pub fn get_webhook(c: &Connection, id: &str) -> Result<Option<Webhook>> {
@@ -321,13 +386,26 @@ pub fn delete_webhook(c: &Connection, id: &str) -> Result<()> {
 /// Record a delivery result; returns the new consecutive failure count.
 pub fn webhook_result(c: &Connection, id: &str, ok: bool, disable_after: i64) -> Result<i64> {
     if ok {
-        c.execute("UPDATE webhooks SET failures = 0, last_ok = ?1 WHERE id = ?2", params![now(), id])?;
+        c.execute(
+            "UPDATE webhooks SET failures = 0, last_ok = ?1 WHERE id = ?2",
+            params![now(), id],
+        )?;
         return Ok(0);
     }
-    c.execute("UPDATE webhooks SET failures = failures + 1 WHERE id = ?1", [id])?;
-    let f: i64 = c.query_row("SELECT failures FROM webhooks WHERE id = ?1", [id], |r| r.get(0)).unwrap_or(0);
+    c.execute(
+        "UPDATE webhooks SET failures = failures + 1 WHERE id = ?1",
+        [id],
+    )?;
+    let f: i64 = c
+        .query_row("SELECT failures FROM webhooks WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .unwrap_or(0);
     if f >= disable_after {
-        c.execute("UPDATE webhooks SET status = 'disabled' WHERE id = ?1", [id])?;
+        c.execute(
+            "UPDATE webhooks SET status = 'disabled' WHERE id = ?1",
+            [id],
+        )?;
     }
     Ok(f)
 }
@@ -382,11 +460,17 @@ pub fn list_runs(c: &Connection, limit: usize) -> Result<Vec<RunRow>> {
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
-pub fn notifications_for_event(c: &Connection, event_id: &str, public_only: bool) -> Result<Vec<NotificationItem>> {
+pub fn notifications_for_event(
+    c: &Connection,
+    event_id: &str,
+    public_only: bool,
+) -> Result<Vec<NotificationItem>> {
     let mut st = c.prepare(
         "SELECT json FROM notifications WHERE event_id = ?1 AND (?2 = 0 OR public = 1) ORDER BY seq",
     )?;
-    let rows = st.query_map(params![event_id, public_only as i64], |r| r.get::<_, String>(0))?;
+    let rows = st.query_map(params![event_id, public_only as i64], |r| {
+        r.get::<_, String>(0)
+    })?;
     let mut out = Vec::new();
     for j in rows {
         out.push(serde_json::from_str(&j?)?);

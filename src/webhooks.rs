@@ -104,23 +104,31 @@ pub async fn check_target(raw: &str, allow_http: bool) -> Result<(url::Url, Sock
     if !url.username().is_empty() || url.password().is_some() {
         return Err(ApiError(400, "url must not contain credentials".into()));
     }
-    let host = url.host_str().ok_or_else(|| ApiError(400, "url has no host".into()))?.to_string();
+    let host = url
+        .host_str()
+        .ok_or_else(|| ApiError(400, "url has no host".into()))?
+        .to_string();
     let port = url.port_or_known_default().unwrap_or(443);
     if raw.len() > 2048 {
         return Err(ApiError(400, "url too long".into()));
     }
-    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.trim_matches(|c| c == '[' || c == ']'), port))
-        .await
-        .map_err(|_| ApiError(400, "url host does not resolve".into()))?
-        .collect();
+    let addrs: Vec<SocketAddr> =
+        tokio::net::lookup_host((host.trim_matches(|c| c == '[' || c == ']'), port))
+            .await
+            .map_err(|_| ApiError(400, "url host does not resolve".into()))?
+            .collect();
     if addrs.is_empty() {
         return Err(ApiError(400, "url host does not resolve".into()));
     }
     // Debug builds only: allow local receivers for end-to-end tests. Release builds ignore this.
-    let test_bypass = cfg!(debug_assertions) && std::env::var("NEM_TEST_ALLOW_PRIVATE_WEBHOOKS").as_deref() == Ok("1");
+    let test_bypass = cfg!(debug_assertions)
+        && std::env::var("NEM_TEST_ALLOW_PRIVATE_WEBHOOKS").as_deref() == Ok("1");
     if let Some(bad) = addrs.iter().find(|a| !is_public_ip(a.ip())) {
         if !test_bypass {
-            return Err(ApiError(400, format!("url resolves to a non-public address ({})", bad.ip())));
+            return Err(ApiError(
+                400,
+                format!("url resolves to a non-public address ({})", bad.ip()),
+            ));
         }
     }
     Ok((url, addrs[0]))
@@ -160,15 +168,28 @@ fn rate_limited(app: &App, ip: IpAddr) -> bool {
 
 pub async fn register(app: &App, req: RegisterReq, ip: IpAddr) -> Result<RegisterResp, ApiError> {
     if rate_limited(app, ip) {
-        return Err(ApiError(429, "too many registrations from this address; try again later".into()));
+        return Err(ApiError(
+            429,
+            "too many registrations from this address; try again later".into(),
+        ));
     }
-    let count = app.with_db(store::count_webhooks).map_err(|e| ApiError(500, e.to_string()))?;
+    let count = app
+        .with_db(store::count_webhooks)
+        .map_err(|e| ApiError(500, e.to_string()))?;
     if count >= app.cfg.public.max_webhooks {
-        return Err(ApiError(503, "webhook capacity reached; use the Atom/JSON feeds or ntfy".into()));
+        return Err(ApiError(
+            503,
+            "webhook capacity reached; use the Atom/JSON feeds or ntfy".into(),
+        ));
     }
-    let min_severity = req.min_severity.unwrap_or_else(|| app.cfg.public.min_severity.clone());
+    let min_severity = req
+        .min_severity
+        .unwrap_or_else(|| app.cfg.public.min_severity.clone());
     if Severity::parse(&min_severity).is_none() {
-        return Err(ApiError(400, "min_severity must be high, extreme or cap".into()));
+        return Err(ApiError(
+            400,
+            "min_severity must be high, extreme or cap".into(),
+        ));
     }
     let regions = match req.regions {
         Some(r) if !r.is_empty() => {
@@ -186,39 +207,68 @@ pub async fn register(app: &App, req: RegisterReq, ip: IpAddr) -> Result<Registe
     // Verification handshake: the receiver must echo the challenge.
     let id = format!("wh_{}", rand_hex(8));
     let challenge = rand_hex(16);
-    let body = serde_json::json!({"type": "verification", "subscription_id": id, "challenge": challenge});
+    let body =
+        serde_json::json!({"type": "verification", "subscription_id": id, "challenge": challenge});
     let client = pinned_client(app, &url, addr).map_err(|e| ApiError(500, e.to_string()))?;
     let resp = client
         .post(url.as_str())
         .json(&body)
         .send()
         .await
-        .map_err(|e| ApiError(400, format!("verification request failed: {}", e.without_url())))?;
+        .map_err(|e| {
+            ApiError(
+                400,
+                format!("verification request failed: {}", e.without_url()),
+            )
+        })?;
     if !resp.status().is_success() {
-        return Err(ApiError(400, format!("verification returned HTTP {}", resp.status().as_u16())));
+        return Err(ApiError(
+            400,
+            format!("verification returned HTTP {}", resp.status().as_u16()),
+        ));
     }
     let text = resp.text().await.unwrap_or_default();
     let echoed = text.trim() == challenge
         || serde_json::from_str::<serde_json::Value>(&text)
             .ok()
-            .and_then(|v| v.get("challenge").and_then(|c| c.as_str()).map(|c| c == challenge))
+            .and_then(|v| {
+                v.get("challenge")
+                    .and_then(|c| c.as_str())
+                    .map(|c| c == challenge)
+            })
             .unwrap_or(false);
     if !echoed {
-        return Err(ApiError(400, "verification failed: respond with the challenge value".into()));
+        return Err(ApiError(
+            400,
+            "verification failed: respond with the challenge value".into(),
+        ));
     }
 
     let secret = format!("whsec_{}", rand_hex(24));
     let manage_token = format!("mt_{}", rand_hex(24));
-    let hook = Webhook { id: id.clone(), url: url.to_string(), secret: secret.clone(), regions, min_severity, failures: 0 };
+    let hook = Webhook {
+        id: id.clone(),
+        url: url.to_string(),
+        secret: secret.clone(),
+        regions,
+        min_severity,
+        failures: 0,
+    };
     app.with_db(|c| store::insert_webhook(c, &hook, &sha256_hex(&manage_token), &ip.to_string()))
         .map_err(|e| ApiError(500, e.to_string()))?;
     tracing::info!(id = %id, "webhook registered");
-    Ok(RegisterResp { id, secret, manage_token })
+    Ok(RegisterResp {
+        id,
+        secret,
+        manage_token,
+    })
 }
 
 /// Check a bearer token against the stored hash.
 pub fn authorise(app: &App, id: &str, token: &str) -> Result<(), ApiError> {
-    let row = app.with_db(|c| store::get_webhook_manage_hash(c, id)).map_err(|e| ApiError(500, e.to_string()))?;
+    let row = app
+        .with_db(|c| store::get_webhook_manage_hash(c, id))
+        .map_err(|e| ApiError(500, e.to_string()))?;
     match row {
         Some((hash, _)) if constant_eq(&hash, &sha256_hex(token)) => Ok(()),
         _ => Err(ApiError(404, "subscription not found".into())),
@@ -226,14 +276,23 @@ pub fn authorise(app: &App, id: &str, token: &str) -> Result<(), ApiError> {
 }
 
 fn constant_eq(a: &str, b: &str) -> bool {
-    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    a.len() == b.len()
+        && a.bytes()
+            .zip(b.bytes())
+            .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+            == 0
 }
 
 fn matches(hook: &Webhook, item: &NotificationItem) -> bool {
-    let region_ok = hook.regions.as_ref().is_none_or(|r| r.contains(&item.event.region));
+    let region_ok = hook
+        .regions
+        .as_ref()
+        .is_none_or(|r| r.contains(&item.event.region));
     let sev_ok = match item.event.kind {
         crate::model::EventKind::LowPrice => true,
-        crate::model::EventKind::HighPrice => crate::notify::severity_meets(&item.event, Some(&hook.min_severity)),
+        crate::model::EventKind::HighPrice => {
+            crate::notify::severity_meets(&item.event, Some(&hook.min_severity))
+        }
     };
     region_ok && sev_ok
 }
@@ -275,9 +334,16 @@ async fn deliver_with_retry(app: &App, hook: &Webhook, item: &NotificationItem) 
     let _ = app.with_db(|c| store::webhook_result(c, &hook.id, false, disable_after));
 }
 
-pub async fn deliver(app: &App, hook: &Webhook, item: &NotificationItem, kind: &str) -> Result<(), String> {
+pub async fn deliver(
+    app: &App,
+    hook: &Webhook,
+    item: &NotificationItem,
+    kind: &str,
+) -> Result<(), String> {
     // Re-check the target on every delivery: DNS may have changed since registration.
-    let (url, addr) = check_target(&hook.url, app.cfg.public.allow_http_webhooks).await.map_err(|e| e.1)?;
+    let (url, addr) = check_target(&hook.url, app.cfg.public.allow_http_webhooks)
+        .await
+        .map_err(|e| e.1)?;
     let client = pinned_client(app, &url, addr).map_err(|e| e.to_string())?;
     let body = serde_json::to_string(&serde_json::json!({
         "type": format!("{kind}.{}", item.transition),
@@ -290,7 +356,10 @@ pub async fn deliver(app: &App, hook: &Webhook, item: &NotificationItem, kind: &
         .post(url.as_str())
         .header("content-type", "application/json")
         .header("x-nem-timestamp", ts.to_string())
-        .header("x-nem-signature", format!("sha256={}", sign(&hook.secret, ts, &body)))
+        .header(
+            "x-nem-signature",
+            format!("sha256={}", sign(&hook.secret, ts, &body)),
+        )
         .header("x-nem-event-id", &item.event_id)
         .header("x-nem-delivery", format!("{}-{}", item.seq, hook.id))
         .body(body)
@@ -310,8 +379,23 @@ mod tests {
 
     #[test]
     fn rejects_internal_addresses() {
-        for ip in ["127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.1", "169.254.169.254", "100.64.0.1", "0.0.0.0", "::1", "fd00::1", "fe80::1", "::ffff:10.0.0.1"] {
-            assert!(!is_public_ip(ip.parse().unwrap()), "{ip} should be rejected");
+        for ip in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "0.0.0.0",
+            "::1",
+            "fd00::1",
+            "fe80::1",
+            "::ffff:10.0.0.1",
+        ] {
+            assert!(
+                !is_public_ip(ip.parse().unwrap()),
+                "{ip} should be rejected"
+            );
         }
         for ip in ["1.1.1.1", "203.2.218.214", "2606:4700:4700::1111"] {
             assert!(is_public_ip(ip.parse().unwrap()), "{ip} should be allowed");
@@ -320,8 +404,12 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_bad_urls() {
-        assert!(check_target("http://example.com/hook", false).await.is_err());
-        assert!(check_target("https://user:pw@example.com/hook", false).await.is_err());
+        assert!(check_target("http://example.com/hook", false)
+            .await
+            .is_err());
+        assert!(check_target("https://user:pw@example.com/hook", false)
+            .await
+            .is_err());
         assert!(check_target("https://127.0.0.1/hook", false).await.is_err());
         assert!(check_target("https://localhost/hook", false).await.is_err());
         assert!(check_target("ftp://example.com", false).await.is_err());

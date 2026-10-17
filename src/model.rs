@@ -178,8 +178,15 @@ impl Event {
     }
 }
 
-pub const TRANSITIONS: &[&str] =
-    &["opened", "confirmed", "escalated", "flagged", "closed", "discarded", "data_ready"];
+pub const TRANSITIONS: &[&str] = &[
+    "opened",
+    "confirmed",
+    "escalated",
+    "flagged",
+    "closed",
+    "discarded",
+    "data_ready",
+];
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TransitionKind {

@@ -54,11 +54,17 @@ enum Side {
 
 impl Detector {
     pub fn new(cfg: DetectCfg) -> Self {
-        Self { cfg, state: DetectorState::default() }
+        Self {
+            cfg,
+            state: DetectorState::default(),
+        }
     }
 
     pub fn restore(cfg: DetectCfg, json: &str) -> anyhow::Result<Self> {
-        Ok(Self { cfg, state: serde_json::from_str(json)? })
+        Ok(Self {
+            cfg,
+            state: serde_json::from_str(json)?,
+        })
     }
 
     pub fn state_json(&self) -> String {
@@ -100,14 +106,24 @@ impl Detector {
         let prices: Vec<(&String, f64)> = snap.regions.iter().map(|(r, v)| (r, v.rrp)).collect();
         let max = prices.iter().map(|p| p.1).fold(f64::MIN, f64::max);
         let min = prices.iter().map(|p| p.1).fold(f64::MAX, f64::min);
-        let min_region = prices.iter().find(|p| p.1 == min).map(|p| p.0.clone()).unwrap_or_default();
+        let min_region = prices
+            .iter()
+            .find(|p| p.1 == min)
+            .map(|p| p.0.clone())
+            .unwrap_or_default();
 
         let mut out = Vec::new();
         let regions = self.cfg.regions.clone();
         for region in &regions {
-            let Some(ri) = snap.regions.get(region) else { continue };
+            let Some(ri) = snap.regions.get(region) else {
+                continue;
+            };
             let mut rs = self.state.regions.remove(region).unwrap_or_default();
-            rs.series.push_back(Point { t: snap.settlement, price: ri.rrp, demand: ri.demand });
+            rs.series.push_back(Point {
+                t: snap.settlement,
+                price: ri.rrp,
+                demand: ri.demand,
+            });
             while rs.series.len() > SERIES_LEN {
                 rs.series.pop_front();
             }
@@ -158,9 +174,17 @@ impl Detector {
                         if side == Side::High { "high" } else { "low" }
                     ),
                     region: region.to_string(),
-                    kind: if side == Side::High { EventKind::HighPrice } else { EventKind::LowPrice },
+                    kind: if side == Side::High {
+                        EventKind::HighPrice
+                    } else {
+                        EventKind::LowPrice
+                    },
                     status: Status::Developing,
-                    severity: if side == Side::High { self.severity(p) } else { Severity::Floor },
+                    severity: if side == Side::High {
+                        self.severity(p)
+                    } else {
+                        Severity::Floor
+                    },
                     trading_day: trading_day(t).to_string(),
                     start: iso_market(t),
                     last_active: iso_market(t),
@@ -180,8 +204,15 @@ impl Detector {
                     data_tier: "live".into(),
                     updated_at: now_iso(),
                 };
-                out.push(Transition { kind: TransitionKind::Opened, event: ev.clone() });
-                Draft { event: ev, prices: Vec::new(), quiet: 0 }
+                out.push(Transition {
+                    kind: TransitionKind::Opened,
+                    event: ev.clone(),
+                });
+                Draft {
+                    event: ev,
+                    prices: Vec::new(),
+                    quiet: 0,
+                }
             }
             None => return out,
         };
@@ -222,8 +253,12 @@ impl Detector {
 
         // Mean and min over the active span (exclude the quiet tail).
         let last_active = ev.last_active_time().unwrap_or(t);
-        let span: Vec<f64> =
-            draft.prices.iter().filter(|(pt, _)| *pt <= last_active).map(|(_, v)| *v).collect();
+        let span: Vec<f64> = draft
+            .prices
+            .iter()
+            .filter(|(pt, _)| *pt <= last_active)
+            .map(|(_, v)| *v)
+            .collect();
         if !span.is_empty() {
             ev.mean_price = span.iter().sum::<f64>() / span.len() as f64;
             ev.min_price = span.iter().cloned().fold(f64::MAX, f64::min);
@@ -257,8 +292,13 @@ impl Detector {
         let mut new_public_flag = None;
         if side == Side::High {
             if !ev.has_flag("whiplash") {
-                if let Some(detail) = whiplash(&rs_series_prices(&rs.series, c.whiplash_window), c) {
-                    ev.flags.push(Flag { kind: "whiplash".into(), first_interval: iso_market(t), detail });
+                if let Some(detail) = whiplash(&rs_series_prices(&rs.series, c.whiplash_window), c)
+                {
+                    ev.flags.push(Flag {
+                        kind: "whiplash".into(),
+                        first_interval: iso_market(t),
+                        detail,
+                    });
                     new_public_flag = Some("whiplash".to_string());
                 }
             }
@@ -291,10 +331,16 @@ impl Detector {
         ev.updated_at = now_iso();
 
         if !was_confirmed && ev.status == Status::Confirmed {
-            out.push(Transition { kind: TransitionKind::Confirmed, event: ev.clone() });
+            out.push(Transition {
+                kind: TransitionKind::Confirmed,
+                event: ev.clone(),
+            });
         } else if was_confirmed {
             if let Some(flag) = new_public_flag {
-                out.push(Transition { kind: TransitionKind::Flagged { flag }, event: ev.clone() });
+                out.push(Transition {
+                    kind: TransitionKind::Flagged { flag },
+                    event: ev.clone(),
+                });
             }
         }
 
@@ -305,10 +351,16 @@ impl Detector {
             ev.updated_at = now_iso();
             if ev.status == Status::Confirmed {
                 ev.status = Status::Closed;
-                out.push(Transition { kind: TransitionKind::Closed, event: ev.clone() });
+                out.push(Transition {
+                    kind: TransitionKind::Closed,
+                    event: ev.clone(),
+                });
             } else {
                 ev.status = Status::Discarded;
-                out.push(Transition { kind: TransitionKind::Discarded, event: ev.clone() });
+                out.push(Transition {
+                    kind: TransitionKind::Discarded,
+                    event: ev.clone(),
+                });
             }
         } else {
             match side {
@@ -330,7 +382,11 @@ fn now_iso() -> String {
 
 fn rs_series_prices(series: &VecDeque<Point>, window: usize) -> Vec<f64> {
     let n = series.len();
-    series.iter().skip(n.saturating_sub(window)).map(|p| p.price).collect()
+    series
+        .iter()
+        .skip(n.saturating_sub(window))
+        .map(|p| p.price)
+        .collect()
 }
 
 /// Count direction reversals between consecutive large price moves: the
@@ -342,7 +398,9 @@ pub fn whiplash(prices: &[f64], c: &DetectCfg) -> Option<String> {
     let diffs: Vec<f64> = prices.windows(2).map(|w| w[1] - w[0]).collect();
     let reversals = diffs
         .windows(2)
-        .filter(|d| d[0] * d[1] < 0.0 && d[0].abs() >= c.whiplash_step && d[1].abs() >= c.whiplash_step)
+        .filter(|d| {
+            d[0] * d[1] < 0.0 && d[0].abs() >= c.whiplash_step && d[1].abs() >= c.whiplash_step
+        })
         .count();
     if reversals >= c.whiplash_reversals {
         let lo = prices.iter().cloned().fold(f64::MAX, f64::min);
@@ -361,7 +419,11 @@ pub fn whiplash(prices: &[f64], c: &DetectCfg) -> Option<String> {
 
 fn demand_ramp(series: &VecDeque<Point>, window: usize) -> Option<f64> {
     let n = series.len();
-    let recent: Vec<f64> = series.iter().skip(n.saturating_sub(window)).filter_map(|p| p.demand).collect();
+    let recent: Vec<f64> = series
+        .iter()
+        .skip(n.saturating_sub(window))
+        .filter_map(|p| p.demand)
+        .collect();
     let last = *recent.last()?;
     let min = recent.iter().cloned().fold(f64::MAX, f64::min);
     Some(last - min)
@@ -389,9 +451,11 @@ fn aggregate_network(ev: &mut Event, snap: &DispatchSnapshot) {
         }
     }
     ev.constraints.sort_by(|a, b| {
-        b.binding_intervals
-            .cmp(&a.binding_intervals)
-            .then(b.max_abs_marginal.partial_cmp(&a.max_abs_marginal).unwrap_or(std::cmp::Ordering::Equal))
+        b.binding_intervals.cmp(&a.binding_intervals).then(
+            b.max_abs_marginal
+                .partial_cmp(&a.max_abs_marginal)
+                .unwrap_or(std::cmp::Ordering::Equal),
+        )
     });
     ev.constraints.truncate(10);
 
@@ -402,7 +466,11 @@ fn aggregate_network(ev: &mut Event, snap: &DispatchSnapshot) {
             continue;
         }
         let dir = if at_export { "export" } else { "import" };
-        match ev.interconnectors_at_limit.iter_mut().find(|a| a.id == ic.id && a.direction == dir) {
+        match ev
+            .interconnectors_at_limit
+            .iter_mut()
+            .find(|a| a.id == ic.id && a.direction == dir)
+        {
             Some(a) => a.intervals_at_limit += 1,
             None => ev.interconnectors_at_limit.push(InterconnectorAgg {
                 id: ic.id.clone(),
@@ -417,7 +485,11 @@ fn aggregate_network(ev: &mut Event, snap: &DispatchSnapshot) {
 pub fn money(v: f64) -> String {
     let neg = v < 0.0;
     let a = v.abs();
-    let s = if a >= 100.0 { format!("{:.0}", a) } else { format!("{:.2}", a) };
+    let s = if a >= 100.0 {
+        format!("{:.0}", a)
+    } else {
+        format!("{:.2}", a)
+    };
     let (int, frac) = match s.split_once('.') {
         Some((i, f)) => (i.to_string(), format!(".{f}")),
         None => (s.clone(), String::new()),
@@ -438,9 +510,26 @@ mod tests {
     use crate::time::parse_market;
 
     fn snap(t: &str, nsw: f64, qld: f64) -> DispatchSnapshot {
-        let mut s = DispatchSnapshot { settlement: parse_market(t).unwrap(), ..Default::default() };
-        s.regions.insert("NSW1".into(), RegionInterval { rrp: nsw, demand: Some(11000.0), ..Default::default() });
-        s.regions.insert("QLD1".into(), RegionInterval { rrp: qld, demand: Some(7000.0), ..Default::default() });
+        let mut s = DispatchSnapshot {
+            settlement: parse_market(t).unwrap(),
+            ..Default::default()
+        };
+        s.regions.insert(
+            "NSW1".into(),
+            RegionInterval {
+                rrp: nsw,
+                demand: Some(11000.0),
+                ..Default::default()
+            },
+        );
+        s.regions.insert(
+            "QLD1".into(),
+            RegionInterval {
+                rrp: qld,
+                demand: Some(7000.0),
+                ..Default::default()
+            },
+        );
         s
     }
 
@@ -461,13 +550,17 @@ mod tests {
 
     #[test]
     fn single_blip_is_discarded() {
-        let (ts, _) = run(&[200.0, 6000.0, 300.0, 250.0, 240.0, 230.0, 220.0, 210.0, 200.0]);
+        let (ts, _) = run(&[
+            200.0, 6000.0, 300.0, 250.0, 240.0, 230.0, 220.0, 210.0, 200.0,
+        ]);
         assert_eq!(names(&ts), vec!["opened", "discarded"]);
     }
 
     #[test]
     fn sustained_spike_confirms_and_closes() {
-        let (ts, _) = run(&[200.0, 6000.0, 7000.0, 8000.0, 900.0, 300.0, 300.0, 300.0, 300.0, 300.0, 300.0]);
+        let (ts, _) = run(&[
+            200.0, 6000.0, 7000.0, 8000.0, 900.0, 300.0, 300.0, 300.0, 300.0, 300.0, 300.0,
+        ]);
         assert_eq!(names(&ts), vec!["opened", "confirmed", "closed"]);
         let closed = &ts.last().unwrap().event;
         assert_eq!(closed.intervals_above_high, 3);
@@ -478,7 +571,10 @@ mod tests {
     #[test]
     fn cap_price_confirms_immediately_and_escalates() {
         let (ts, _) = run(&[200.0, 6000.0, 6500.0, 7000.0, 12000.0, 23107.0]);
-        assert_eq!(names(&ts), vec!["opened", "confirmed", "escalated", "escalated"]);
+        assert_eq!(
+            names(&ts),
+            vec!["opened", "confirmed", "escalated", "escalated"]
+        );
         assert_eq!(ts.last().unwrap().event.severity, Severity::Cap);
         let (ts, _) = run(&[200.0, 23107.0]);
         assert_eq!(names(&ts), vec!["opened", "confirmed"]);
@@ -486,7 +582,9 @@ mod tests {
 
     #[test]
     fn whiplash_is_flagged() {
-        let (ts, d) = run(&[200.0, 1300.0, 766.0, 23000.0, 400.0, 9800.0, 1500.0, 17000.0, 900.0]);
+        let (ts, d) = run(&[
+            200.0, 1300.0, 766.0, 23000.0, 400.0, 9800.0, 1500.0, 17000.0, 900.0,
+        ]);
         assert!(names(&ts).contains(&"flagged"));
         assert!(d.open_events()[0].has_flag("whiplash"));
         assert!(d.open_events()[0].has_flag("price_separation"));
@@ -507,7 +605,9 @@ mod tests {
 
     #[test]
     fn low_price_event() {
-        let (ts, _) = run(&[50.0, -950.0, -1000.0, -990.0, 20.0, 30.0, 30.0, 30.0, 30.0, 30.0]);
+        let (ts, _) = run(&[
+            50.0, -950.0, -1000.0, -990.0, 20.0, 30.0, 30.0, 30.0, 30.0, 30.0,
+        ]);
         assert_eq!(names(&ts), vec!["opened", "confirmed", "closed"]);
         assert_eq!(ts[0].event.kind, EventKind::LowPrice);
         assert_eq!(ts.last().unwrap().event.peak_price, -1000.0);

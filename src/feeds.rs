@@ -21,24 +21,48 @@ pub fn xml_escape(s: &str) -> String {
 
 pub fn atom(items: &[NotificationItem], cfg: &Config) -> String {
     let base = cfg.server.public_url.trim_end_matches('/');
-    let updated = items.first().map(|i| i.created_at.clone()).unwrap_or_else(|| "1970-01-01T00:00:00Z".into());
+    let updated = items
+        .first()
+        .map(|i| i.created_at.clone())
+        .unwrap_or_else(|| "1970-01-01T00:00:00Z".into());
     let mut s = String::new();
     s.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<feed xmlns=\"http://www.w3.org/2005/Atom\">\n");
-    s.push_str(&format!("<title>{}</title>\n", xml_escape(&cfg.public.site_title)));
+    s.push_str(&format!(
+        "<title>{}</title>\n",
+        xml_escape(&cfg.public.site_title)
+    ));
     s.push_str("<subtitle>Automatically detected events in the Australian National Electricity Market, from AEMO public data.</subtitle>\n");
     s.push_str(&format!("<id>{}/feed.atom</id>\n", xml_escape(base)));
-    s.push_str(&format!("<link rel=\"self\" href=\"{}/feed.atom\"/>\n", xml_escape(base)));
-    s.push_str(&format!("<link rel=\"alternate\" href=\"{}/\"/>\n", xml_escape(base)));
+    s.push_str(&format!(
+        "<link rel=\"self\" href=\"{}/feed.atom\"/>\n",
+        xml_escape(base)
+    ));
+    s.push_str(&format!(
+        "<link rel=\"alternate\" href=\"{}/\"/>\n",
+        xml_escape(base)
+    ));
     s.push_str(&format!("<updated>{}</updated>\n", xml_escape(&updated)));
-    s.push_str(&format!("<author><name>{}</name></author>\n", xml_escape(&cfg.public.site_title)));
+    s.push_str(&format!(
+        "<author><name>{}</name></author>\n",
+        xml_escape(&cfg.public.site_title)
+    ));
     for i in items {
         s.push_str("<entry>\n");
         s.push_str(&format!("<id>{}/n/{}</id>\n", xml_escape(base), i.seq));
         s.push_str(&format!("<title>{}</title>\n", xml_escape(&i.title)));
         s.push_str(&format!("<link href=\"{}\"/>\n", xml_escape(&i.url)));
-        s.push_str(&format!("<updated>{}</updated>\n", xml_escape(&i.created_at)));
-        s.push_str(&format!("<category term=\"{}\"/>\n", xml_escape(&i.transition)));
-        s.push_str(&format!("<category term=\"{}\"/>\n", xml_escape(&i.event.region)));
+        s.push_str(&format!(
+            "<updated>{}</updated>\n",
+            xml_escape(&i.created_at)
+        ));
+        s.push_str(&format!(
+            "<category term=\"{}\"/>\n",
+            xml_escape(&i.transition)
+        ));
+        s.push_str(&format!(
+            "<category term=\"{}\"/>\n",
+            xml_escape(&i.event.region)
+        ));
         s.push_str(&format!("<summary>{}</summary>\n", xml_escape(&i.summary)));
         s.push_str("</entry>\n");
     }
@@ -70,6 +94,9 @@ pub fn json_feed(items: &[NotificationItem], cfg: &Config) -> serde_json::Value 
 mod tests {
     #[test]
     fn escapes() {
-        assert_eq!(super::xml_escape("a<b & \"c\""), "a&lt;b &amp; &quot;c&quot;");
+        assert_eq!(
+            super::xml_escape("a<b & \"c\""),
+            "a&lt;b &amp; &quot;c&quot;"
+        );
     }
 }

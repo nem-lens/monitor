@@ -16,7 +16,11 @@ fn dur_label(ev: &Event) -> String {
             let mins = (e - s).num_minutes() + 5;
             if mins >= 60 {
                 let (h, m) = (mins / 60, mins % 60);
-                if m == 0 { format!("{h}h") } else { format!("{h}h {m}m") }
+                if m == 0 {
+                    format!("{h}h")
+                } else {
+                    format!("{h}h {m}m")
+                }
             } else {
                 format!("{mins} min")
             }
@@ -26,7 +30,9 @@ fn dur_label(ev: &Event) -> String {
 }
 
 fn t_label(s: &str, region: &str) -> String {
-    crate::time::parse_market(s).map(|t| local_label(t, region)).unwrap_or_else(|| s.to_string())
+    crate::time::parse_market(s)
+        .map(|t| local_label(t, region))
+        .unwrap_or_else(|| s.to_string())
 }
 
 fn flag_sentence(ev: &Event) -> String {
@@ -167,7 +173,11 @@ pub async fn publish(app: &App, tr: Transition) {
         transition: tr.kind.name().to_string(),
         title,
         summary,
-        url: format!("{}/?event={}", app.cfg.server.public_url.trim_end_matches('/'), tr.event.id),
+        url: format!(
+            "{}/?event={}",
+            app.cfg.server.public_url.trim_end_matches('/'),
+            tr.event.id
+        ),
         created_at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         public,
         event: tr.event.clone(),
@@ -210,7 +220,11 @@ async fn send_ntfy(app: &App, item: &NotificationItem) {
     if topic.is_empty() {
         return;
     }
-    let url = format!("{}/{}", app.cfg.public.ntfy_server.trim_end_matches('/'), topic);
+    let url = format!(
+        "{}/{}",
+        app.cfg.public.ntfy_server.trim_end_matches('/'),
+        topic
+    );
     let priority = match (item.transition.as_str(), item.event.severity) {
         (_, Severity::Cap) => "5",
         ("confirmed" | "escalated", _) => "4",
@@ -235,7 +249,15 @@ async fn send_ntfy(app: &App, item: &NotificationItem) {
 
 /// HTTP header values must be visible ASCII; ntfy titles are short anyway.
 fn ascii_header(s: &str) -> String {
-    s.chars().map(|c| if c.is_ascii() && !c.is_ascii_control() { c } else { ' ' }).collect()
+    s.chars()
+        .map(|c| {
+            if c.is_ascii() && !c.is_ascii_control() {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -251,10 +273,21 @@ mod tests {
         let mut d = Detector::new(cfg.detect.clone());
         let mut t = parse_market("2026/10/12 14:00:00").unwrap();
         let mut last = None;
-        for p in [200.0, 6000.0, 23107.0, 7000.0, 300.0, 300.0, 300.0, 300.0, 300.0, 300.0] {
+        for p in [
+            200.0, 6000.0, 23107.0, 7000.0, 300.0, 300.0, 300.0, 300.0, 300.0, 300.0,
+        ] {
             t += chrono::Duration::minutes(5);
-            let mut s = DispatchSnapshot { settlement: t, ..Default::default() };
-            s.regions.insert("NSW1".into(), RegionInterval { rrp: p, ..Default::default() });
+            let mut s = DispatchSnapshot {
+                settlement: t,
+                ..Default::default()
+            };
+            s.regions.insert(
+                "NSW1".into(),
+                RegionInterval {
+                    rrp: p,
+                    ..Default::default()
+                },
+            );
             for tr in d.ingest(&s) {
                 last = Some(tr);
             }

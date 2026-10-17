@@ -74,7 +74,10 @@ pub struct StoreCfg {
 
 impl Default for StoreCfg {
     fn default() -> Self {
-        Self { path: "nem-monitor.db".into(), retain_days: 90 }
+        Self {
+            path: "nem-monitor.db".into(),
+            retain_days: 90,
+        }
     }
 }
 
@@ -109,7 +112,10 @@ pub struct DetectCfg {
 impl Default for DetectCfg {
     fn default() -> Self {
         Self {
-            regions: ["NSW1", "QLD1", "VIC1", "SA1", "TAS1"].iter().map(|s| s.to_string()).collect(),
+            regions: ["NSW1", "QLD1", "VIC1", "SA1", "TAS1"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             market_price_cap: 23_200.0,
             high_price: 5_000.0,
             extreme_price: 10_000.0,
@@ -208,8 +214,14 @@ impl Config {
 
     pub fn validate(&self) -> anyhow::Result<()> {
         let d = &self.detect;
-        anyhow::ensure!(d.high_price < d.extreme_price, "high_price must be below extreme_price");
-        anyhow::ensure!(d.close_price <= d.high_price, "close_price must not exceed high_price");
+        anyhow::ensure!(
+            d.high_price < d.extreme_price,
+            "high_price must be below extreme_price"
+        );
+        anyhow::ensure!(
+            d.close_price <= d.high_price,
+            "close_price must not exceed high_price"
+        );
         anyhow::ensure!(d.quiet_intervals >= 1, "quiet_intervals must be at least 1");
         anyhow::ensure!(d.whiplash_window >= 3, "whiplash_window must be at least 3");
         anyhow::ensure!(

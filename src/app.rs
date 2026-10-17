@@ -59,7 +59,10 @@ impl App {
             cfg: Arc::new(cfg),
             db: Arc::new(Mutex::new(conn)),
             tx,
-            health: Arc::new(RwLock::new(Health { mode: mode.into(), ..Default::default() })),
+            health: Arc::new(RwLock::new(Health {
+                mode: mode.into(),
+                ..Default::default()
+            })),
             http,
             trigger_sem: Arc::new(Semaphore::new(triggers)),
             delivery_sem: Arc::new(Semaphore::new(16)),
@@ -71,8 +74,14 @@ impl App {
     }
 
     /// Run a closure against the database. Never hold the guard across an await.
-    pub fn with_db<T>(&self, f: impl FnOnce(&Connection) -> anyhow::Result<T>) -> anyhow::Result<T> {
-        let guard = self.db.lock().map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
+    pub fn with_db<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let guard = self
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("database lock poisoned"))?;
         f(&guard)
     }
 }

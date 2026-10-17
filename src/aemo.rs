@@ -28,7 +28,8 @@ impl Table {
     }
 
     pub fn num(&self, row: &[String], name: &str) -> Option<f64> {
-        self.col(row, name).and_then(|s| s.trim().parse::<f64>().ok())
+        self.col(row, name)
+            .and_then(|s| s.trim().parse::<f64>().ok())
     }
 }
 
@@ -44,15 +45,24 @@ pub fn parse_report(bytes: &[u8]) -> Result<HashMap<String, Table>> {
         if rec.len() < 4 {
             continue;
         }
-        let key = format!("{}_{}", rec[1].trim().to_uppercase(), rec[2].trim().to_uppercase());
+        let key = format!(
+            "{}_{}",
+            rec[1].trim().to_uppercase(),
+            rec[2].trim().to_uppercase()
+        );
         match rec[0].trim() {
             "I" => {
                 let t = tables.entry(key).or_default();
-                t.columns = rec.iter().skip(4).map(|c| c.trim().to_uppercase()).collect();
+                t.columns = rec
+                    .iter()
+                    .skip(4)
+                    .map(|c| c.trim().to_uppercase())
+                    .collect();
             }
             "D" => {
                 if let Some(t) = tables.get_mut(&key) {
-                    t.rows.push(rec.iter().skip(4).map(|c| c.to_string()).collect());
+                    t.rows
+                        .push(rec.iter().skip(4).map(|c| c.to_string()).collect());
                 }
             }
             _ => {}
@@ -63,12 +73,16 @@ pub fn parse_report(bytes: &[u8]) -> Result<HashMap<String, Table>> {
 
 fn is_pricing_run(t: &Table, row: &[String]) -> bool {
     // INTERVENTION = 0 is the pricing run, which sets the published price.
-    t.col(row, "INTERVENTION").map(|v| v.trim() == "0" || v.trim().is_empty()).unwrap_or(true)
+    t.col(row, "INTERVENTION")
+        .map(|v| v.trim() == "0" || v.trim().is_empty())
+        .unwrap_or(true)
 }
 
 /// Extract the fields the detector needs from a DispatchIS report.
 pub fn dispatch_snapshot(tables: &HashMap<String, Table>) -> Result<DispatchSnapshot> {
-    let price = tables.get("DISPATCH_PRICE").context("report has no DISPATCH,PRICE table")?;
+    let price = tables
+        .get("DISPATCH_PRICE")
+        .context("report has no DISPATCH,PRICE table")?;
     let mut snap = DispatchSnapshot::default();
     let mut settlement = None;
 
@@ -84,7 +98,13 @@ pub fn dispatch_snapshot(tables: &HashMap<String, Table>) -> Result<DispatchSnap
             continue;
         };
         settlement = Some(settlement.map_or(sd, |s: chrono::NaiveDateTime| s.max(sd)));
-        snap.regions.insert(region.trim().to_string(), RegionInterval { rrp, ..Default::default() });
+        snap.regions.insert(
+            region.trim().to_string(),
+            RegionInterval {
+                rrp,
+                ..Default::default()
+            },
+        );
     }
     snap.settlement = settlement.context("no priced regions in report")?;
 
@@ -93,7 +113,10 @@ pub fn dispatch_snapshot(tables: &HashMap<String, Table>) -> Result<DispatchSnap
             if !is_pricing_run(rs, row) {
                 continue;
             }
-            if let Some(r) = rs.col(row, "REGIONID").and_then(|id| snap.regions.get_mut(id.trim())) {
+            if let Some(r) = rs
+                .col(row, "REGIONID")
+                .and_then(|id| snap.regions.get_mut(id.trim()))
+            {
                 r.demand = rs.num(row, "TOTALDEMAND");
                 r.available_gen = rs.num(row, "AVAILABLEGENERATION");
                 r.net_interchange = rs.num(row, "NETINTERCHANGE");
@@ -106,7 +129,9 @@ pub fn dispatch_snapshot(tables: &HashMap<String, Table>) -> Result<DispatchSnap
             if !is_pricing_run(c, row) {
                 continue;
             }
-            let Some(id) = c.col(row, "CONSTRAINTID") else { continue };
+            let Some(id) = c.col(row, "CONSTRAINTID") else {
+                continue;
+            };
             snap.constraints.push(ConstraintRow {
                 id: id.trim().to_string(),
                 rhs: c.num(row, "RHS"),
@@ -122,7 +147,9 @@ pub fn dispatch_snapshot(tables: &HashMap<String, Table>) -> Result<DispatchSnap
             if !is_pricing_run(ic, row) {
                 continue;
             }
-            let Some(id) = ic.col(row, "INTERCONNECTORID") else { continue };
+            let Some(id) = ic.col(row, "INTERCONNECTORID") else {
+                continue;
+            };
             snap.interconnectors.push(InterconnectorRow {
                 id: id.trim().to_string(),
                 flow: ic.num(row, "MWFLOW").unwrap_or(0.0),

@@ -19,7 +19,10 @@ fn daily_re() -> &'static Regex {
 
 /// DispatchIS filenames found anywhere in a listing (HTML or plain text), sorted and deduplicated.
 pub fn dispatch_files(listing: &str) -> Vec<String> {
-    let mut v: Vec<String> = dispatch_re().find_iter(listing).map(|m| m.as_str().to_string()).collect();
+    let mut v: Vec<String> = dispatch_re()
+        .find_iter(listing)
+        .map(|m| m.as_str().to_string())
+        .collect();
     v.sort();
     v.dedup();
     v
@@ -98,8 +101,14 @@ mod tests {
         Saturday, October 17, 2026 09:46 AM 21391 PUBLIC_DISPATCHIS_202610170950_0000000543327927.zip"#;
         let files = dispatch_files(html);
         assert_eq!(files.len(), 2);
-        assert_eq!(files[0], "PUBLIC_DISPATCHIS_202610170950_0000000543327927.zip");
-        assert_eq!(dispatch_file_interval(&files[1]).unwrap().to_string(), "2026-10-17 09:55:00");
+        assert_eq!(
+            files[0],
+            "PUBLIC_DISPATCHIS_202610170950_0000000543327927.zip"
+        );
+        assert_eq!(
+            dispatch_file_interval(&files[1]).unwrap().to_string(),
+            "2026-10-17 09:55:00"
+        );
     }
 
     #[test]

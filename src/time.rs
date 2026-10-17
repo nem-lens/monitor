@@ -29,7 +29,9 @@ pub fn parse_market(s: &str) -> Option<NaiveDateTime> {
     let s = s.trim().trim_matches('"');
     NaiveDateTime::parse_from_str(s, "%Y/%m/%d %H:%M:%S")
         .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S"))
-        .or_else(|_| NaiveDateTime::parse_from_str(s.trim_end_matches("+10:00"), "%Y-%m-%dT%H:%M:%S"))
+        .or_else(|_| {
+            NaiveDateTime::parse_from_str(s.trim_end_matches("+10:00"), "%Y-%m-%dT%H:%M:%S")
+        })
         .ok()
 }
 
@@ -86,9 +88,18 @@ mod tests {
 
     #[test]
     fn trading_day_boundary() {
-        assert_eq!(trading_day(t("2026/10/13 04:00:00")).to_string(), "2026-10-12");
-        assert_eq!(trading_day(t("2026/10/13 04:05:00")).to_string(), "2026-10-13");
-        assert_eq!(trading_day(t("2026/10/12 15:35:00")).to_string(), "2026-10-12");
+        assert_eq!(
+            trading_day(t("2026/10/13 04:00:00")).to_string(),
+            "2026-10-12"
+        );
+        assert_eq!(
+            trading_day(t("2026/10/13 04:05:00")).to_string(),
+            "2026-10-13"
+        );
+        assert_eq!(
+            trading_day(t("2026/10/12 15:35:00")).to_string(),
+            "2026-10-12"
+        );
     }
 
     #[test]
