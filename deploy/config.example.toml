@@ -44,11 +44,14 @@ min_severity = "high"             # high | extreme | cap
 include_low_price = true
 ntfy_server = "https://ntfy.sh"
 ntfy_topic = ""                   # e.g. "nem-events-yourname"; empty disables push
+webhooks_enabled = true          # false: webhook routes return 404 and the page hides the form
 max_webhooks = 1000
 allow_http_webhooks = false
 webhook_registrations_per_ip_per_hour = 5
 webhook_disable_after_failures = 10
 feed_items = 50
+max_sse_connections = 200         # live-stream clients; more get 503
+api_requests_per_ip_per_minute = 120   # API and feeds, per client IP; 0 disables
 
 # Operator triggers run the rest of the pipeline. Commands run without a shell;
 # the notification JSON arrives on stdin and as NEM_* environment variables.

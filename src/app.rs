@@ -59,6 +59,10 @@ pub struct App {
     pub trigger_sem: Arc<Semaphore>,
     pub delivery_sem: Arc<Semaphore>,
     pub reg_limiter: Arc<Mutex<HashMap<IpAddr, Vec<Instant>>>>,
+    /// Per-IP request counts for the current minute (window start, count).
+    pub api_limiter: Arc<Mutex<HashMap<IpAddr, (Instant, u32)>>>,
+    /// One permit per open live-stream connection.
+    pub sse_slots: Arc<Semaphore>,
     /// Send to ntfy and public webhooks.
     pub notify_external: bool,
     /// Run operator triggers.
@@ -75,6 +79,7 @@ impl App {
             .timeout(std::time::Duration::from_secs(15))
             .build()?;
         let triggers = cfg.max_concurrent_triggers.unwrap_or(2).max(1);
+        let sse = cfg.public.max_sse_connections;
         Ok(Self {
             cfg: Arc::new(cfg),
             db: Arc::new(Mutex::new(conn)),
@@ -88,6 +93,8 @@ impl App {
             trigger_sem: Arc::new(Semaphore::new(triggers)),
             delivery_sem: Arc::new(Semaphore::new(16)),
             reg_limiter: Arc::new(Mutex::new(HashMap::new())),
+            api_limiter: Arc::new(Mutex::new(HashMap::new())),
+            sse_slots: Arc::new(Semaphore::new(sse)),
             notify_external: true,
             fire_triggers: true,
             echo: false,

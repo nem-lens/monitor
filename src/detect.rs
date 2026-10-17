@@ -307,11 +307,11 @@ impl Detector {
                     kind: "price_separation".into(),
                     first_interval: iso_market(t),
                     detail: format!(
-                        "{} ${} vs {} ${}/MWh",
+                        "{} {} vs {} {}/MWh",
                         region,
-                        money(p),
+                        dollars(p),
                         sep.1,
-                        money(sep.2)
+                        dollars(sep.2)
                     ),
                 });
             }
@@ -406,11 +406,11 @@ pub fn whiplash(prices: &[f64], c: &DetectCfg) -> Option<String> {
         let lo = prices.iter().cloned().fold(f64::MAX, f64::min);
         let hi = prices.iter().cloned().fold(f64::MIN, f64::max);
         Some(format!(
-            "{} large reversals within {} intervals, swinging between ${} and ${}/MWh",
+            "{} large reversals within {} intervals, swinging between {} and {}/MWh",
             reversals,
             prices.len(),
-            money(lo),
-            money(hi)
+            dollars(lo),
+            dollars(hi)
         ))
     } else {
         None
@@ -478,6 +478,15 @@ fn aggregate_network(ev: &mut Event, snap: &DispatchSnapshot) {
                 direction: dir.into(),
             }),
         }
+    }
+}
+
+/// A price with its dollar sign, sign first: "$23,107", "-$1,000".
+pub fn dollars(v: f64) -> String {
+    if v < 0.0 {
+        format!("-${}", money(-v))
+    } else {
+        format!("${}", money(v))
     }
 }
 
@@ -622,6 +631,10 @@ mod tests {
         assert_eq!(money(0.0), "0.00");
         assert_eq!(money(-0.5), "-0.50");
         assert_eq!(money(999.6), "1,000");
+        assert_eq!(dollars(23107.0), "$23,107");
+        assert_eq!(dollars(-1000.0), "-$1,000");
+        assert_eq!(dollars(-0.5), "-$0.50");
+        assert_eq!(dollars(0.0), "$0.00");
     }
 
     /// Shaped on the synthetic 12 October fixture (scripts/make_fixture.py); not AEMO data.

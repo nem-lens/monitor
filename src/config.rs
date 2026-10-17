@@ -151,11 +151,17 @@ pub struct PublicCfg {
     /// ntfy server and topic for public push; empty topic disables.
     pub ntfy_server: String,
     pub ntfy_topic: String,
+    /// Off: the webhook routes return 404 and the page hides the form.
+    pub webhooks_enabled: bool,
     pub max_webhooks: usize,
     pub allow_http_webhooks: bool,
     pub webhook_registrations_per_ip_per_hour: usize,
     pub webhook_disable_after_failures: i64,
     pub feed_items: usize,
+    /// Concurrent live-stream (SSE) clients; further connections get 503.
+    pub max_sse_connections: usize,
+    /// Requests per client IP per minute across the API and feeds; 0 disables.
+    pub api_requests_per_ip_per_minute: u32,
 }
 
 impl Default for PublicCfg {
@@ -166,11 +172,14 @@ impl Default for PublicCfg {
             include_low_price: true,
             ntfy_server: "https://ntfy.sh".into(),
             ntfy_topic: String::new(),
+            webhooks_enabled: true,
             max_webhooks: 1000,
             allow_http_webhooks: false,
             webhook_registrations_per_ip_per_hour: 5,
             webhook_disable_after_failures: 10,
             feed_items: 50,
+            max_sse_connections: 200,
+            api_requests_per_ip_per_minute: 120,
         }
     }
 }

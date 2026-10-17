@@ -105,6 +105,7 @@ const NAME = { NSW1: "NSW", VIC1: "Victoria", QLD1: "Queensland", SA1: "South Au
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const money = (v) => v == null ? "–" : v === 0 ? "0" : (Math.abs(v) >= 100 ? Math.round(v).toLocaleString("en-AU") : v.toFixed(2));
+const dollars = (v) => v == null ? "–" : (v < 0 ? "-$" + money(-v) : "$" + money(v));
 const localTime = (iso, region) => iso ? new Date(iso).toLocaleTimeString("en-AU", { timeZone: TZ[region] || "Australia/Brisbane", hour: "numeric", minute: "2-digit", timeZoneName: "short" }) : "";
 const localDate = (iso, region) => iso ? new Date(iso).toLocaleDateString("en-AU", { timeZone: TZ[region] || "Australia/Brisbane", weekday: "short", day: "numeric", month: "short" }) : "";
 let thresholds = { high_price: 5000, market_price_cap: 23200 };
@@ -125,7 +126,7 @@ async function loadStatus() {
   $("cards").innerHTML = s.regions.map((r) => `
     <div class="card ${r.rrp != null && r.rrp >= thresholds.high_price ? "hot" : ""}">
       <div class="name"><span>${esc(r.name)}</span>${r.open_event ? `<a href="?event=${encodeURIComponent(r.open_event)}" class="badge sev-high">event</a>` : ""}</div>
-      <div class="price">${r.rrp == null ? "–" : "$" + money(r.rrp)} <small>${esc(r.local_time || "")}</small></div>
+      <div class="price">${r.rrp == null ? "–" : dollars(r.rrp)} <small>${esc(r.local_time || "")}</small></div>
       ${spark(r.series)}
     </div>`).join("");
   renderSubscribe(s.subscribe);
@@ -138,7 +139,7 @@ function eventRow(e) {
   return `<div class="row" data-id="${esc(e.id)}">
     <div><div class="t">${esc(NAME[e.region] || e.region)} · ${label} <span class="badge sev-${e.severity}">${esc(e.severity)}</span></div>
       <div class="m">${esc(when)} · ${e.intervals_above_high} intervals beyond threshold${flags ? " · " + esc(flags) : ""}</div></div>
-    <div class="p">$${money(e.peak_price)}<div class="m">${e.kind === "low_price" ? "lowest" : "peak"}</div></div>
+    <div class="p">${dollars(e.peak_price)}<div class="m">${e.kind === "low_price" ? "lowest" : "peak"}</div></div>
   </div>`;
 }
 
@@ -159,7 +160,7 @@ function chart(series, ev) {
   const Y = (v) => T + (1 - (v - vmin) / (vmax - vmin)) * (H - T - B);
   const step = [1000, 2000, 5000, 10000, 20000].find((s) => vmax / s <= 6) || 50000;
   let g = "";
-  for (let v = 0; v <= vmax; v += step) g += `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--line)"/><text x="${L - 6}" y="${Y(v) + 4}" text-anchor="end" font-size="11" fill="var(--muted)">$${money(v)}</text>`;
+  for (let v = 0; v <= vmax; v += step) g += `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--line)"/><text x="${L - 6}" y="${Y(v) + 4}" text-anchor="end" font-size="11" fill="var(--muted)">${dollars(v)}</text>`;
   const s0 = new Date(ev.start).getTime() - 5 * 60e3, s1 = new Date(ev.end || ev.last_active).getTime();
   const band = `<rect x="${X(s0)}" y="${T}" width="${Math.max(2, X(s1) - X(s0))}" height="${H - T - B}" fill="var(--accent-soft)"/>`;
   const thr = `<line x1="${L}" x2="${W - R}" y1="${Y(thresholds.high_price)}" y2="${Y(thresholds.high_price)}" stroke="var(--warn)" stroke-dasharray="4 4"/>`;
@@ -187,9 +188,9 @@ async function openEvent(id, push) {
     <h3>${esc(NAME[e.region] || e.region)} · ${low ? "Low prices" : "Price spike"} <span class="badge sev-${e.severity}">${esc(e.severity)}</span></h3>
     <div class="status">${esc(localDate(e.start, e.region))}, ${esc(localTime(e.start, e.region))} to ${e.end ? esc(localTime(e.end, e.region)) : "ongoing"} · status ${esc(e.status)} · data ${esc(e.data_tier.replace("_", " "))}</div>
     <div class="facts">
-      <div class="fact"><b>$${money(e.peak_price)}</b><span>${low ? "lowest" : "peak"} at ${esc(localTime(e.peak_interval, e.region))}</span></div>
-      <div class="fact"><b>${e.intervals_above_high}</b><span>intervals ${low ? "at or below $" + money(thresholds.floor_price) : "above $" + money(thresholds.high_price)}</span></div>
-      <div class="fact"><b>$${money(e.mean_price)}</b><span>average over event</span></div>
+      <div class="fact"><b>${dollars(e.peak_price)}</b><span>${low ? "lowest" : "peak"} at ${esc(localTime(e.peak_interval, e.region))}</span></div>
+      <div class="fact"><b>${e.intervals_above_high}</b><span>intervals ${low ? "at or below " + dollars(thresholds.floor_price) : "above " + dollars(thresholds.high_price)}</span></div>
+      <div class="fact"><b>${dollars(e.mean_price)}</b><span>average over event</span></div>
       <div class="fact"><b>${e.demand_peak ? Math.round(e.demand_peak).toLocaleString("en-AU") + " MW" : "–"}</b><span>peak demand</span></div>
     </div>
     ${chart(series, e)}
@@ -216,6 +217,12 @@ function renderSubscribe(sub) {
     ${ntfy}
     <div class="box"><h4>Live stream</h4><p>Server-sent events with every interval and notification, for dashboards and bots.</p>
       ${copyRow("sse", sub.sse)}<pre>curl -N ${esc(sub.sse)}</pre></div>
+    ${sub.webhooks ? webhookBox() : ""}`;
+  if (sub.webhooks) $("whform").onsubmit = registerWebhook;
+}
+
+function webhookBox() {
+  return `
     <div class="box" style="grid-column: 1 / -1"><h4>Webhook</h4>
       <p>We POST signed JSON to your HTTPS endpoint. To verify ownership we first send <code>{"type":"verification","challenge":"…"}</code>; respond 200 with the challenge value. Each delivery carries <code>X-NEM-Timestamp</code> and <code>X-NEM-Signature: sha256=HMAC(secret, timestamp + "." + body)</code>.</p>
       <form id="whform">
@@ -230,7 +237,9 @@ const crypto = require("crypto");
 const expected = "sha256=" + crypto.createHmac("sha256", SECRET)
   .update(req.headers["x-nem-timestamp"] + "." + rawBody).digest("hex");
 const ok = crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(req.headers["x-nem-signature"]));</pre></div>`;
-  $("whform").onsubmit = async (ev) => {
+}
+
+async function registerWebhook(ev) {
     ev.preventDefault();
     const f = new FormData(ev.target);
     const body = { url: f.get("url"), min_severity: f.get("min_severity") };
@@ -240,7 +249,6 @@ const ok = crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(req.headers
     const j = await r.json();
     if (!r.ok) { $("whresult").className = "result err"; $("whresult").textContent = j.error || "Registration failed"; return; }
     $("whresult").innerHTML = `Registered <code>${esc(j.id)}</code>. Save these now; they are shown once.<pre>secret        ${esc(j.secret)}\nmanage_token  ${esc(j.manage_token)}\n\n# unsubscribe\ncurl -X DELETE -H "Authorization: Bearer ${esc(j.manage_token)}" ${esc(location.origin)}/api/webhooks/${esc(j.id)}</pre>`;
-  };
 }
 
 function logNotification(n) {

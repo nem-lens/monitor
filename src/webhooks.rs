@@ -508,6 +508,67 @@ mod tests {
         );
     }
 
+    /// Handover P1.2 acceptance: a proxy environment variable does not change
+    /// which address webhooks connect to.
+    #[tokio::test]
+    async fn pinned_client_ignores_proxy_environment() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let _ = s.read(&mut buf).await;
+                    let _ = s
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
+                        )
+                        .await;
+                });
+            }
+        });
+        // A dead proxy: any client that uses it fails.
+        for k in [
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+        ] {
+            std::env::set_var(k, "http://127.0.0.1:9");
+        }
+        let url =
+            url::Url::parse(&format!("http://hook.example.invalid:{}/x", addr.port())).unwrap();
+        let app = App::new(
+            crate::config::Config::default(),
+            store::open(":memory:").unwrap(),
+            "offline",
+        )
+        .unwrap();
+        let pinned = pinned_client(&app, &url, addr).unwrap();
+        let control = reqwest::Client::builder()
+            .resolve("hook.example.invalid", addr)
+            .build()
+            .unwrap();
+        let pinned_result = pinned.get(url.as_str()).send().await;
+        let control_result = control.get(url.as_str()).send().await;
+        for k in [
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+        ] {
+            std::env::remove_var(k);
+        }
+        assert_eq!(pinned_result.unwrap().status(), 200);
+        assert!(
+            control_result.is_err(),
+            "control client should have used the dead proxy"
+        );
+    }
+
     #[test]
     fn constant_eq_compares_whole_strings() {
         assert!(constant_eq("abc", "abc"));

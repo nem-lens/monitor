@@ -1,11 +1,14 @@
 //! Public HTTP surface: live page, JSON API, feeds, live stream and webhook
 //! subscriptions.
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
+use std::time::{Duration, Instant};
 
-use axum::extract::{ConnectInfo, Path, Query, State};
+use axum::extract::{ConnectInfo, Path, Query, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
+use axum::middleware::Next;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
@@ -28,7 +31,7 @@ pub fn router(app: App) -> Router {
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
-    Router::new()
+    let mut r = Router::new()
         .route("/", get(index))
         .route("/healthz", get(healthz))
         .route("/api/status", get(status))
@@ -36,14 +39,78 @@ pub fn router(app: App) -> Router {
         .route("/api/events/{id}", get(event_detail))
         .route("/api/notifications", get(notifications))
         .route("/api/stream", get(stream))
-        .route("/api/webhooks", post(register_webhook))
-        .route("/api/webhooks/{id}", axum::routing::delete(delete_webhook))
-        .route("/api/webhooks/{id}/test", post(test_webhook))
         .route("/api/admin/runs", get(admin_runs))
         .route("/feed.atom", get(atom))
-        .route("/feed.json", get(json_feed))
-        .layer(cors)
-        .with_state(app)
+        .route("/feed.json", get(json_feed));
+    if app.cfg.public.webhooks_enabled {
+        r = r
+            .route("/api/webhooks", post(register_webhook))
+            .route("/api/webhooks/{id}", axum::routing::delete(delete_webhook))
+            .route("/api/webhooks/{id}/test", post(test_webhook));
+    }
+    r.layer(axum::middleware::from_fn_with_state(
+        app.clone(),
+        rate_limit,
+    ))
+    .layer(cors)
+    .with_state(app)
+}
+
+const RATE_WINDOW: Duration = Duration::from_secs(60);
+/// Clients tracked at once; when full of current entries, new clients are
+/// refused, which bounds memory.
+const MAX_TRACKED_CLIENTS: usize = 10_000;
+
+/// Per-IP fixed-window limit over every route except `/healthz`.
+async fn rate_limit(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let limit = app.cfg.public.api_requests_per_ip_per_minute;
+    if limit == 0 || req.uri().path() == "/healthz" {
+        return next.run(req).await;
+    }
+    let ip = client_ip(&app, req.headers(), peer);
+    let ok = app
+        .api_limiter
+        .lock()
+        .map(|mut m| allow_request(&mut m, ip, Instant::now(), limit))
+        .unwrap_or(false);
+    if !ok {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER, "60")],
+            Json(serde_json::json!({ "error": "too many requests; try again in a minute" })),
+        )
+            .into_response();
+    }
+    next.run(req).await
+}
+
+fn allow_request(
+    map: &mut HashMap<IpAddr, (Instant, u32)>,
+    ip: IpAddr,
+    now: Instant,
+    limit: u32,
+) -> bool {
+    let current = |start: &Instant| now.saturating_duration_since(*start) < RATE_WINDOW;
+    if map.len() >= MAX_TRACKED_CLIENTS && !map.contains_key(&ip) {
+        map.retain(|_, (start, _)| current(start));
+        if map.len() >= MAX_TRACKED_CLIENTS {
+            return false;
+        }
+    }
+    let entry = map.entry(ip).or_insert((now, 0));
+    if !current(&entry.0) {
+        *entry = (now, 0);
+    }
+    if entry.1 >= limit {
+        return false;
+    }
+    entry.1 += 1;
+    true
 }
 
 impl IntoResponse for ApiError {
@@ -133,7 +200,7 @@ async fn status(State(app): State<App>) -> Result<Json<serde_json::Value>, ApiEr
             "json_feed": format!("{base}/feed.json"),
             "sse": format!("{base}/api/stream"),
             "ntfy": ntfy,
-            "webhooks": format!("{base}/api/webhooks"),
+            "webhooks": cfg.public.webhooks_enabled.then(|| format!("{base}/api/webhooks")),
         },
     })))
 }
@@ -219,9 +286,17 @@ async fn notifications(
 
 async fn stream(
     State(app): State<App>,
-) -> Sse<impl futures_util::Stream<Item = Result<SseEvent, Infallible>>> {
+) -> Result<Sse<impl futures_util::Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
+    // The permit lives as long as the stream, so it is released on disconnect.
+    let slot = app.sse_slots.clone().try_acquire_owned().map_err(|_| {
+        ApiError(
+            503,
+            "live stream is at capacity; use the feeds or try again later".into(),
+        )
+    })?;
     let rx = app.tx.subscribe();
-    let s = BroadcastStream::new(rx).filter_map(|m| {
+    let s = BroadcastStream::new(rx).filter_map(move |m| {
+        let _slot = &slot;
         m.ok().map(|msg| {
             Ok(SseEvent::default()
                 .event(msg.kind)
@@ -229,7 +304,7 @@ async fn stream(
                 .unwrap_or_default())
         })
     });
-    Sse::new(s).keep_alive(KeepAlive::default())
+    Ok(Sse::new(s).keep_alive(KeepAlive::default()))
 }
 
 async fn atom(State(app): State<App>) -> Result<Response, ApiError> {
@@ -472,6 +547,97 @@ mod tests {
             .unwrap();
         let (st, _, body) = call(&app, req).await;
         assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    }
+
+    #[tokio::test]
+    async fn webhooks_can_be_switched_off() {
+        let mut cfg = Config::default();
+        cfg.public.webhooks_enabled = false;
+        let app = app_with(cfg, "offline");
+        let req = Request::post("/api/webhooks")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"url":"https://example.org/hook"}"#))
+            .unwrap();
+        assert_eq!(call(&app, req).await.0, StatusCode::NOT_FOUND);
+        let del = Request::delete("/api/webhooks/wh_x")
+            .header("authorization", "Bearer mt_x")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(call(&app, del).await.0, StatusCode::NOT_FOUND);
+        let (_, _, body) = call(&app, get("/api/status")).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(v["subscribe"]["webhooks"].is_null());
+        assert!(v["subscribe"]["atom"].is_string());
+    }
+
+    #[tokio::test]
+    async fn live_stream_connections_are_capped() {
+        let mut cfg = Config::default();
+        cfg.public.max_sse_connections = 1;
+        let app = app_with(cfg, "offline");
+        let open = || {
+            let peer: SocketAddr = "203.0.113.9:5000".parse().unwrap();
+            router(app.clone())
+                .layer(MockConnectInfo(peer))
+                .oneshot(get("/api/stream"))
+        };
+        let first = open().await.unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(
+            open().await.unwrap().status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        drop(first);
+        assert_eq!(
+            open().await.unwrap().status(),
+            StatusCode::OK,
+            "slot released on disconnect"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_requests_are_rate_limited_per_ip() {
+        let mut cfg = Config::default();
+        cfg.public.api_requests_per_ip_per_minute = 3;
+        let app = app_with(cfg, "offline");
+        for _ in 0..3 {
+            assert_eq!(call(&app, get("/api/events")).await.0, StatusCode::OK);
+        }
+        let (st, h, _) = call(&app, get("/feed.json")).await;
+        assert_eq!(st, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(h[header::RETRY_AFTER], "60");
+        assert_eq!(
+            call(&app, get("/healthz")).await.0,
+            StatusCode::OK,
+            "health checks exempt"
+        );
+    }
+
+    #[test]
+    fn rate_window_resets_and_memory_is_bounded() {
+        let mut map = HashMap::new();
+        let ip: IpAddr = "203.0.113.1".parse().unwrap();
+        let t0 = Instant::now();
+        assert!(allow_request(&mut map, ip, t0, 2));
+        assert!(allow_request(&mut map, ip, t0, 2));
+        assert!(!allow_request(&mut map, ip, t0, 2));
+        assert!(
+            allow_request(&mut map, ip, t0 + RATE_WINDOW, 2),
+            "new minute"
+        );
+
+        let mut full: HashMap<IpAddr, (Instant, u32)> = (0..MAX_TRACKED_CLIENTS as u32)
+            .map(|i| (IpAddr::from(std::net::Ipv4Addr::from(i)), (t0, 1)))
+            .collect();
+        assert!(
+            !allow_request(&mut full, ip, t0, 2),
+            "full of current clients"
+        );
+        assert!(
+            allow_request(&mut full, ip, t0 + RATE_WINDOW, 2),
+            "stale entries pruned"
+        );
+        assert_eq!(full.len(), 1);
     }
 
     #[test]

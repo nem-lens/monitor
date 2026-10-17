@@ -2,7 +2,7 @@
 
 Read this file and `README.md` first, then run `cargo test` and `cargo clippy` to confirm a clean baseline (20 tests passing, zero clippy warnings at handover).
 
-**Update, 17 Oct 2026.** The repo now lives in the `nem-lens` GitHub organisation as `monitor`, checked out beside `aemo` (the shared `nem-lens-aemo` crate, which holds the AEMO parser, market time and NEMWeb file handling formerly in `src/aemo.rs`, `src/time.rs` and `src/nemweb.rs`). The baseline is now 53 tests on Linux and Windows plus `scripts/e2e_smoke.py`; see "Testing" in `README.md`. P0.3 and P1.4 below are done, and P1.2 is implemented.
+**Update, 17 Oct 2026.** The repo now lives in the `nem-lens` GitHub organisation as `monitor`, checked out beside `aemo` (the shared `nem-lens-aemo` crate, which holds the AEMO parser, market time and NEMWeb file handling formerly in `src/aemo.rs`, `src/time.rs` and `src/nemweb.rs`). The baseline is now 53 tests on Linux and Windows plus `scripts/e2e_smoke.py`; see "Testing" in `README.md`. P0.3, P0.4 (on real AEMO files) and all of P1 below are done.
 
 ## 1. Context
 
@@ -96,9 +96,9 @@ Trigger commands on Windows use `powershell -Command ...` instead of `sh -c ...`
    - **Accept when:** after a fixture replay plus `mark-data-ready`, only the bundle and a 48-hour buffer remain; a DuckDB query over the bundle reproduces the event's peak and interval counts; manifest hashes match the source zips.
 
 ### P1. Hardening
-1. `public.webhooks_enabled = false` switch (route returns 404 when off).
-2. Build webhook clients with `.no_proxy()` so address pinning holds behind corporate proxies. (Implemented 17 Oct 2026; the proxy acceptance test is still to write.)
-3. Cap concurrent SSE connections (for example 200) and add a simple per-IP rate limit to the JSON API.
+1. `public.webhooks_enabled = false` switch (route returns 404 when off). (Done 17 Oct 2026.)
+2. Build webhook clients with `.no_proxy()` so address pinning holds behind corporate proxies. (Done 17 Oct 2026, with an acceptance test that fails without the fix.)
+3. Cap concurrent SSE connections (for example 200) and add a simple per-IP rate limit to the JSON API. (Done 17 Oct 2026: `max_sse_connections` and `api_requests_per_ip_per_minute`.)
 4. Gate Unix-only tests; add a Windows CI job. (Done 17 Oct 2026: trigger tests have Unix and Windows variants; CI runs both.)
    - **Accept when:** tests pass on Linux and Windows; a proxy env var does not change which address webhooks connect to.
 

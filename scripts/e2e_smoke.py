@@ -90,6 +90,7 @@ public_url = "{BASE}"
 path = {json.dumps(str(work / "e2e.db"))}
 [public]
 allow_http_webhooks = true
+api_requests_per_ip_per_minute = 0   # this script polls faster than the default limit
 [[triggers]]
 name = "echo"
 on = ["confirmed"]
