@@ -1,0 +1,25 @@
+name: Keepalive
+
+# GitHub disables scheduled workflows after 60 days without repository
+# activity. Re-enabling them through the API each month resets that clock
+# without adding commits.
+
+on:
+  schedule:
+    - cron: "17 3 1 * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - run: |
+          for wf in pages.yml nemweb-canary.yml keepalive.yml; do
+            gh api -X PUT "repos/$REPO/actions/workflows/$wf/enable" && echo "enabled $wf"
+          done

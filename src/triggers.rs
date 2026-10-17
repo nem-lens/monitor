@@ -23,8 +23,11 @@ pub fn matches(t: &TriggerCfg, item: &NotificationItem) -> bool {
             .is_none_or(|r| r.contains(&item.event.region))
 }
 
-pub fn substitute(arg: &str, item: &NotificationItem) -> String {
+/// Fill `{placeholder}`s from internally generated fields only. `{bundle}` is
+/// the event's bundle directory (written for closed events; complete at data_ready).
+pub fn substitute(arg: &str, item: &NotificationItem, bundle: &str) -> String {
     arg.replace("{event_id}", &item.event_id)
+        .replace("{bundle}", bundle)
         .replace("{region}", &item.event.region)
         .replace("{transition}", &item.transition)
         .replace("{data_tier}", &item.event.data_tier)
@@ -51,7 +54,8 @@ async fn run(app: &App, t: &TriggerCfg, item: &NotificationItem) {
         .with_db(|c| store::start_run(c, &t.name, &item.event_id, &item.transition))
         .ok();
     let (code, tail) = if let Some(argv) = &t.command {
-        run_command(argv, t.timeout_secs, item).await
+        let bundle = crate::bundle::dir_for(&app.cfg.store.bundle_dir, &item.event_id);
+        run_command(argv, t.timeout_secs, item, &bundle.to_string_lossy()).await
     } else if let Some(url) = &t.webhook {
         run_webhook(app, url, t.secret_env.as_deref(), item).await
     } else {
@@ -72,11 +76,12 @@ pub async fn run_command(
     argv: &[String],
     timeout_secs: u64,
     item: &NotificationItem,
+    bundle: &str,
 ) -> (Option<i32>, String) {
     let Some((prog, args)) = argv.split_first() else {
         return (None, "empty command".into());
     };
-    let args: Vec<String> = args.iter().map(|a| substitute(a, item)).collect();
+    let args: Vec<String> = args.iter().map(|a| substitute(a, item, bundle)).collect();
     let mut cmd = tokio::process::Command::new(prog);
     cmd.args(&args)
         .stdin(Stdio::piped())
@@ -90,7 +95,8 @@ pub async fn run_command(
         .env("NEM_TRADING_DAY", &item.event.trading_day)
         .env("NEM_SEVERITY", item.event.severity.as_str())
         .env("NEM_EVENT_START", &item.event.start)
-        .env("NEM_EVENT_END", item.event.end.as_deref().unwrap_or(""));
+        .env("NEM_EVENT_END", item.event.end.as_deref().unwrap_or(""))
+        .env("NEM_BUNDLE", bundle);
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return (None, format!("spawn failed: {e}")),
@@ -218,7 +224,7 @@ mod tests {
 
     #[tokio::test]
     async fn runs_command_with_stdin_env_and_placeholders() {
-        let (code, out) = run_command(&echo_cmd(), 30, &item()).await;
+        let (code, out) = run_command(&echo_cmd(), 30, &item(), "bundles/x").await;
         assert_eq!(code, Some(0), "{out}");
         assert!(out.contains("arg=202610121410-NSW1-high env=NSW1"), "{out}");
         assert!(out.contains("{\"seq\":1"), "{out}");
@@ -226,7 +232,7 @@ mod tests {
 
     #[tokio::test]
     async fn kills_on_timeout() {
-        let (code, out) = run_command(&sleep_cmd(5), 1, &item()).await;
+        let (code, out) = run_command(&sleep_cmd(5), 1, &item(), "").await;
         assert_eq!(code, None);
         assert!(out.contains("timed out"), "{out}");
     }
@@ -240,13 +246,22 @@ mod tests {
         let started = std::time::Instant::now();
         let res = tokio::time::timeout(
             Duration::from_secs(20),
-            run_command(&sleep_cmd(30), 2, &big),
+            run_command(&sleep_cmd(30), 2, &big, ""),
         )
         .await;
         let (code, out) = res.expect("run_command hung past its own timeout");
         assert_eq!(code, None);
         assert!(out.contains("timed out"), "{out}");
         assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn placeholders_include_the_bundle() {
+        let arg = "--bundle={bundle} --out {bundle}/replay --event {event_id} {trading_day}";
+        assert_eq!(
+            substitute(arg, &item(), "bundles/202610121410-NSW1-high"),
+            "--bundle=bundles/202610121410-NSW1-high --out bundles/202610121410-NSW1-high/replay --event 202610121410-NSW1-high 2026-10-12"
+        );
     }
 
     #[test]

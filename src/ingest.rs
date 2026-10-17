@@ -475,19 +475,48 @@ pub async fn promote_ready_events(app: &App) -> Result<()> {
         ev.data_tier = "next_day".into();
         ev.updated_at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         app.with_db(|c| store::upsert_event(c, &ev))?;
+        // Complete the bundle before publishing: data_ready triggers (the
+        // replay engine) read it.
+        if let Err(e) = add_next_day_to_bundle(app, &ev.id).await {
+            tracing::warn!(event = %ev.id, "adding next-day data to bundle: {e:#}");
+        }
+        if let Err(e) = add_static_to_bundle(app, &ev.id) {
+            tracing::warn!(event = %ev.id, "adding MMSDM data to bundle: {e:#}");
+        }
         publish(
             app,
             Transition {
                 kind: TransitionKind::DataReady {
                     tier: "next_day".into(),
                 },
-                event: ev.clone(),
+                event: ev,
             },
         )
         .await;
-        if let Err(e) = add_next_day_to_bundle(app, &ev.id).await {
-            tracing::warn!(event = %ev.id, "adding next-day data to bundle: {e:#}");
-        }
+    }
+    Ok(())
+}
+
+/// With `store.mmsdm_dir` set, add MMSDM equations and unit details to a
+/// written bundle.
+fn add_static_to_bundle(app: &App, event_id: &str) -> Result<()> {
+    let Some(mmsdm) = app.cfg.store.mmsdm_dir.as_deref().filter(|d| !d.is_empty()) else {
+        return Ok(());
+    };
+    let Some(b) = app.with_db(|c| store::get_bundle(c, event_id))? else {
+        return Ok(());
+    };
+    if b.status == "pending" {
+        return Ok(());
+    }
+    let m = bundle::add_static(Path::new(&b.path), Path::new(mmsdm))?;
+    if let Some(s) = m.static_data {
+        tracing::info!(
+            event = %event_id,
+            found = s.equations_found,
+            invoked = s.invoked_versions,
+            "MMSDM equations added to bundle"
+        );
     }
     Ok(())
 }

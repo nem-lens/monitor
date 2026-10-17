@@ -82,6 +82,9 @@ pub struct StoreCfg {
     pub raw_dir: String,
     /// One directory per confirmed event: Parquet tables and manifest.json.
     pub bundle_dir: String,
+    /// Local MMSDM tree (`<dir>/<YYYY_MM>/<TABLE>/*.CSV`). When set, constraint
+    /// equations and unit details are added to each bundle at data_ready.
+    pub mmsdm_dir: Option<String>,
 }
 
 impl Default for StoreCfg {
@@ -91,6 +94,7 @@ impl Default for StoreCfg {
             buffer_hours: 48,
             raw_dir: "raw".into(),
             bundle_dir: "bundles".into(),
+            mmsdm_dir: None,
         }
     }
 }

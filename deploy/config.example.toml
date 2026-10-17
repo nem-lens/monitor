@@ -21,6 +21,7 @@ path = "/var/lib/nem-monitor/nem-monitor.db"  # NOT the default (nem-monitor.db 
 buffer_hours = 48                 # rolling buffer of outcomes and raw zips; events keep theirs in bundles
 raw_dir = "raw"                   # relative to the working directory
 bundle_dir = "bundles"            # bundles/<event_id>/*.parquet + manifest.json
+# mmsdm_dir = "/data/mmsdm"       # optional: <dir>/<YYYY_MM>/<TABLE>/*.CSV; adds constraint equations at data_ready
 
 [detect]
 regions = ["NSW1", "QLD1", "VIC1", "SA1", "TAS1"]
@@ -70,7 +71,7 @@ timeout_secs = 1800
 [[triggers]]
 name = "full-brief"
 on = ["data_ready"]
-command = ["/opt/nemcf/bin/nemcf", "report", "--event", "{event_id}", "--trading-day", "{trading_day}"]
+command = ["/opt/nemcf/bin/nemcf", "replay", "--bundle", "{bundle}", "--out", "{bundle}/replay"]
 timeout_secs = 3600
 
 # Or hand off to a job queue instead of running locally.

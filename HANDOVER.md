@@ -2,7 +2,7 @@
 
 Read this file and `README.md` first, then run `cargo test` and `cargo clippy` to confirm a clean baseline (20 tests passing, zero clippy warnings at handover).
 
-**Update, 17 Oct 2026.** The repo now lives in the `nem-lens` GitHub organisation as `monitor`, checked out beside `aemo` (the shared `nem-lens-aemo` crate, which holds the AEMO parser, market time and NEMWeb file handling formerly in `src/aemo.rs`, `src/time.rs` and `src/nemweb.rs`). The baseline is now 53 tests on Linux and Windows plus `scripts/e2e_smoke.py`; see "Testing" in `README.md`. P0.3, P0.4 (on real AEMO files) and all of P1 below are done.
+**Update, 17 Oct 2026.** The repo now lives in the `nem-lens` GitHub organisation as `monitor`, checked out beside `aemo` (the shared `nem-lens-aemo` crate, which holds the AEMO parser, market time and NEMWeb file handling formerly in `src/aemo.rs`, `src/time.rs` and `src/nemweb.rs`). The baseline is now 69 tests on Linux and Windows plus `scripts/e2e_smoke.py`; see "Testing" in `README.md`. P0.3, P0.4 (on real AEMO files), P1 and P1a below are done; P2 is built but untested on GitHub (no repository yet).
 
 ## 1. Context
 
@@ -94,6 +94,7 @@ Trigger commands on Windows use `powershell -Command ...` instead of `sh -c ...`
 5. The event detail API reads the bundle (or the buffer while the event is open).
 6. Add `docs/duckdb-queries.md` with example queries over `bundles/*/`.
    - **Accept when:** after a fixture replay plus `mark-data-ready`, only the bundle and a 48-hour buffer remain; a DuckDB query over the bundle reproduces the event's peak and interval counts; manifest hashes match the source zips.
+   - **Done 17 Oct 2026**, accepted on the real 12 Oct AEMO files (`data/oct12`) rather than the fixture: DuckDB gives peak 23,107 and 11 intervals; all source hashes match. Deviations: bids are two files (`bids_dayoffer`, `bids_offerperiod`, one per AEMO table) and `offer_trk.parquet` is added; `bundle add-static` adds MMSDM equations and unit details on request. See `docs/duckdb-queries.md`.
 
 ### P1. Hardening
 1. `public.webhooks_enabled = false` switch (route returns 404 when off). (Done 17 Oct 2026.)
@@ -112,6 +113,7 @@ Design:
 - **GitHub Watch notifications:** confirmed creates a Discussion in an announcement-type "Alerts" category (GraphQL `createDiscussion`); later transitions add comments (`addDiscussionComment`); `data_ready` creates a Release with the brief PDF attached once `nem-report` exists. Store Discussion IDs and posted transition sequence numbers in state so reruns never double-post.
 - Add a "How to subscribe" section to the page: Watch → Custom → Discussions or Releases, plus feeds and ntfy.
 - **Accept when:** a replayed fixture pushed through the workflow (via `workflow_dispatch` with a fixture input) produces one Discussion with update comments, a correct static site, and idempotent reruns.
+- **Built 17 Oct 2026, not yet run on GitHub:** `once`, static page mode, `.github/workflows/pages.yml`, `keepalive.yml` and `scripts/github_discussions.py`. Verified locally: two `once` runs over the fixture give identical state and no repeated notifications; the Discussions poster passes create, comment, dry-run, first-run baseline and no-double-post-after-failed-deploy checks against a fake GraphQL server. Releases for briefs wait for `nem-report`. See `docs/github-pages.md`.
 - First check that GitHub-hosted runners can reach nemweb.com.au.
 
 ### P3. Social channels

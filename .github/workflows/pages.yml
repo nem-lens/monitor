@@ -1,0 +1,101 @@
+name: Pages
+
+# Static-site hosting (handover P2): every 5 minutes, load the previous
+# state from the live site, poll NEMWeb once, rebuild the site and deploy it.
+# Deploying adds no commits. Needs Settings > Pages > Source: GitHub Actions.
+#
+# Optional repository variables:
+#   NTFY_TOPIC       ntfy topic for phone push (empty: off)
+#   ALERTS_CATEGORY  Discussions category for event alerts, e.g. "Alerts"
+#                    (an announcement-type category; empty: off)
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      fixture:
+        description: Replay the synthetic fixture instead of polling NEMWeb (use on a test site)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+  discussions: write
+
+concurrency:
+  group: monitor
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: monitor
+      - uses: actions/checkout@v4
+        with:
+          repository: nem-lens/aemo
+          path: aemo
+          token: ${{ secrets.NEM_LENS_READ_TOKEN || github.token }}
+      - id: pages
+        uses: actions/configure-pages@v5
+      - id: bin
+        uses: actions/cache@v4
+        with:
+          path: monitor/target/release/nem-monitor
+          key: nem-monitor-${{ runner.os }}-${{ hashFiles('monitor/Cargo.lock', 'monitor/src/**', 'monitor/static/**', 'aemo/Cargo.lock', 'aemo/src/**') }}
+      - if: steps.bin.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@stable
+      - if: steps.bin.outputs.cache-hit != 'true'
+        working-directory: monitor
+        run: cargo build --release --locked
+      - name: Configure
+        working-directory: monitor
+        env:
+          BASE: ${{ steps.pages.outputs.base_url }}
+          REPO: ${{ github.repository }}
+          NTFY_TOPIC: ${{ vars.NTFY_TOPIC }}
+        run: |
+          cat > pages.toml <<EOF
+          [server]
+          public_url = "$BASE"
+          [source]
+          user_agent = "nem-lens-monitor (+https://github.com/$REPO)"
+          [public]
+          github_repo = "$REPO"
+          ntfy_topic = "$NTFY_TOPIC"
+          EOF
+      - name: Poll once and build the site
+        working-directory: monitor
+        env:
+          BASE: ${{ steps.pages.outputs.base_url }}
+          FIXTURE: ${{ inputs.fixture }}
+        run: |
+          args=(--state-in "$BASE" --site-out site)
+          if [ "$FIXTURE" = "true" ]; then
+            python3 scripts/make_fixture.py fixture
+            args+=(--replay fixture)
+          fi
+          ./target/release/nem-monitor -c pages.toml once "${args[@]}"
+      - name: Post to GitHub Discussions
+        if: vars.ALERTS_CATEGORY != ''
+        working-directory: monitor
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ steps.pages.outputs.base_url }}
+          REPO: ${{ github.repository }}
+          CATEGORY: ${{ vars.ALERTS_CATEGORY }}
+        run: python3 -I scripts/github_discussions.py --site site --previous "$BASE" --repo "$REPO" --category "$CATEGORY"
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: monitor/site
+      - id: deploy
+        uses: actions/deploy-pages@v4
