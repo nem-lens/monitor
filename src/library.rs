@@ -45,6 +45,10 @@ Headline results and replay inputs for NEM price events detected by
 - `events/<id>/scenarios/`: the scenarios run.
 - `events/<id>/manifest.json`: the AEMO source files and their SHA-256.
 
+Times are interval ends in market time with the offset
+(`2026-10-12T14:20:00+10:00`); compare them as times, not as strings with
+the offset stripped from one side.
+
 Source data © AEMO, used under AEMO's copyright permissions. Not affiliated
 with AEMO.
 ";
@@ -294,10 +298,7 @@ pub fn add(inputs: &Inputs, lib: &Path) -> Result<Headline> {
     if let Some(src) = inputs.scenarios {
         copy_scenarios(src, &dir.join("scenarios"), &headline.scenarios)?;
     }
-    let readme = lib.join("README.md");
-    if !readme.exists() {
-        fs::write(readme, README)?;
-    }
+    fs::write(lib.join("README.md"), README)?;
     write_index(lib)?;
     Ok(headline)
 }
