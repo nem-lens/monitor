@@ -182,7 +182,7 @@ pub struct Transition {
 }
 
 /// What subscribers receive: one item per transition.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NotificationItem {
     pub seq: i64,
     pub event_id: String,

@@ -374,6 +374,91 @@ pub fn get_bundle(c: &Connection, event_id: &str) -> Result<Option<BundleRow>> {
     .pop())
 }
 
+// ---- static-site state (export and import) ----
+
+/// One region_intervals row.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct IntervalRow {
+    pub settlement: String,
+    pub region: String,
+    pub rrp: f64,
+    pub demand: Option<f64>,
+    pub available_gen: Option<f64>,
+    pub net_interchange: Option<f64>,
+}
+
+pub fn intervals_since(c: &Connection, from: &str) -> Result<Vec<IntervalRow>> {
+    let mut st = c.prepare(
+        "SELECT settlement, region, rrp, demand, available_gen, net_interchange
+         FROM region_intervals WHERE settlement >= ?1 ORDER BY settlement, region",
+    )?;
+    let rows = st.query_map([from], |r| {
+        Ok(IntervalRow {
+            settlement: r.get(0)?,
+            region: r.get(1)?,
+            rrp: r.get(2)?,
+            demand: r.get(3)?,
+            available_gen: r.get(4)?,
+            net_interchange: r.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+pub fn insert_interval(c: &Connection, r: &IntervalRow) -> Result<()> {
+    c.execute(
+        "INSERT OR REPLACE INTO region_intervals VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            r.settlement,
+            r.region,
+            r.rrp,
+            r.demand,
+            r.available_gen,
+            r.net_interchange
+        ],
+    )?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DataReadyRow {
+    pub source: String,
+    pub trading_day: String,
+    pub filename: String,
+}
+
+pub fn list_data_ready(c: &Connection) -> Result<Vec<DataReadyRow>> {
+    let mut st = c.prepare(
+        "SELECT source, trading_day, filename FROM data_ready ORDER BY trading_day, source",
+    )?;
+    let rows = st.query_map([], |r| {
+        Ok(DataReadyRow {
+            source: r.get(0)?,
+            trading_day: r.get(1)?,
+            filename: r.get(2)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// Restore a notification with its original sequence number, so numbering
+/// (feed ids, delivery ids) continues across runs.
+pub fn restore_notification(c: &Connection, item: &NotificationItem) -> Result<()> {
+    c.execute(
+        "INSERT OR REPLACE INTO notifications (seq, event_id, transition, public, created_at, json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            item.seq,
+            item.event_id,
+            item.transition,
+            item.public as i64,
+            item.created_at,
+            serde_json::to_string(item)?
+        ],
+    )?;
+    Ok(())
+}
+
 /// Record (or replace) the next-day file for a source and trading day.
 pub fn set_data_ready_file(c: &Connection, source: &str, day: &str, filename: &str) -> Result<()> {
     c.execute(

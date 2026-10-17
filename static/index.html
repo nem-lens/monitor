@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{SITE_TITLE}}</title>
-<link rel="alternate" type="application/atom+xml" title="{{SITE_TITLE}}" href="/feed.atom">
-<link rel="alternate" type="application/feed+json" title="{{SITE_TITLE}}" href="/feed.json">
+<link rel="alternate" type="application/atom+xml" title="{{SITE_TITLE}}" href="feed.atom">
+<link rel="alternate" type="application/feed+json" title="{{SITE_TITLE}}" href="feed.json">
 <style>
 :root {
   --bg: #f7f6f2; --panel: #ffffff; --ink: #1d1c1a; --muted: #6b6860; --line: #e3e0d8;
@@ -87,7 +87,7 @@ footer { margin-top: 40px; font-size: 12px; color: var(--muted); }
   <h2>Recent events</h2>
   <div class="list" id="events"><div class="empty">Loading…</div></div>
 
-  <h2>Live notifications</h2>
+  <h2 id="log-h">Live notifications</h2>
   <div class="box"><div id="log"><span class="status" id="log-empty">Waiting for the next notification. This panel updates live.</span></div></div>
 
   <h2>Subscribe</h2>
@@ -109,6 +109,16 @@ const dollars = (v) => v == null ? "–" : (v < 0 ? "-$" + money(-v) : "$" + mon
 const localTime = (iso, region) => iso ? new Date(iso).toLocaleTimeString("en-AU", { timeZone: TZ[region] || "Australia/Brisbane", hour: "numeric", minute: "2-digit", timeZoneName: "short" }) : "";
 const localDate = (iso, region) => iso ? new Date(iso).toLocaleDateString("en-AU", { timeZone: TZ[region] || "Australia/Brisbane", weekday: "short", day: "numeric", month: "short" }) : "";
 let thresholds = { high_price: 5000, market_price_cap: 23200 };
+// Static builds (GitHub Pages) read data/*.json written by `nem-monitor once`; no live stream.
+const STATIC = {{STATIC}};
+const API = {
+  status: STATIC ? "data/status.json" : "/api/status",
+  events: STATIC ? "data/events.json" : "/api/events?limit=30",
+  event: (id) => STATIC ? `data/events/${encodeURIComponent(id)}.json` : `/api/events/${encodeURIComponent(id)}`,
+  notifications: STATIC ? "data/notifications.json" : "/api/notifications?limit=5",
+};
+// Pages caches files for minutes; revalidate so a new run shows up.
+const get = (url) => fetch(url, STATIC ? { cache: "no-cache" } : undefined);
 
 function spark(series) {
   if (!series || series.length < 2) return "";
@@ -118,11 +128,11 @@ function spark(series) {
 }
 
 async function loadStatus() {
-  const s = await (await fetch("/api/status")).json();
+  const s = await (await get(API.status)).json();
   thresholds = s.thresholds;
-  const fresh = s.fresh;
+  // A static site is fresh if its newest interval is recent when viewed.
   const last = s.latest_interval ? `latest interval ${localTime(s.latest_interval, "NSW1")} ${localDate(s.latest_interval, "NSW1")}` : "no data yet";
-  $("status").innerHTML = `<span class="dot ${fresh ? "live" : "stale"}"></span>${s.mode === "live" ? (fresh ? "Live" : "Feed delayed") : esc(s.mode)} · ${esc(last)}`;
+  $("status").innerHTML = `<span class="dot ${fresh ? "live" : "stale"}"></span>${s.mode === "live" ? (fresh ? "Live" : "Feed delayed") : STATIC ? (fresh ? "Updated every 5 minutes" : "Updates delayed") : esc(s.mode)} · ${esc(last)}`;
   $("cards").innerHTML = s.regions.map((r) => `
     <div class="card ${r.rrp != null && r.rrp >= thresholds.high_price ? "hot" : ""}">
       <div class="name"><span>${esc(r.name)}</span>${r.open_event ? `<a href="?event=${encodeURIComponent(r.open_event)}" class="badge sev-high">event</a>` : ""}</div>
@@ -144,7 +154,7 @@ function eventRow(e) {
 }
 
 async function loadEvents() {
-  const { events } = await (await fetch("/api/events?limit=30")).json();
+  const { events } = await (await get(API.events)).json();
   $("events").innerHTML = events.length ? events.map(eventRow).join("") : `<div class="empty">No events detected yet.</div>`;
   document.querySelectorAll("#events .row").forEach((el) => el.onclick = () => openEvent(el.dataset.id, true));
 }
@@ -175,7 +185,7 @@ function chart(series, ev) {
 }
 
 async function openEvent(id, push) {
-  const r = await fetch(`/api/events/${encodeURIComponent(id)}`);
+  const r = await get(API.event(id));
   if (!r.ok) return;
   const { event: e, series, notifications } = await r.json();
   if (push) history.pushState(null, "", `?event=${encodeURIComponent(id)}`);
@@ -215,8 +225,10 @@ function renderSubscribe(sub) {
     <div class="box"><h4>Feed reader</h4><p>Atom or JSON Feed: confirmed events, escalations and wrap-ups.</p>
       ${copyRow("atom", sub.atom)}<div style="height:6px"></div>${copyRow("json", sub.json_feed)}</div>
     ${ntfy}
-    <div class="box"><h4>Live stream</h4><p>Server-sent events with every interval and notification, for dashboards and bots.</p>
-      ${copyRow("sse", sub.sse)}<pre>curl -N ${esc(sub.sse)}</pre></div>
+    ${sub.sse ? `<div class="box"><h4>Live stream</h4><p>Server-sent events with every interval and notification, for dashboards and bots.</p>
+      ${copyRow("sse", sub.sse)}<pre>curl -N ${esc(sub.sse)}</pre></div>` : ""}
+    ${sub.github ? `<div class="box"><h4>GitHub notifications</h4><p>Watch the repository: <b>Watch → Custom</b>, then tick <b>Discussions</b> for event alerts and updates, or <b>Releases</b> for the morning-after briefs.</p>
+      ${copyRow("github", sub.github)}</div>` : ""}
     ${sub.webhooks ? webhookBox() : ""}`;
   if (sub.webhooks) $("whform").onsubmit = registerWebhook;
 }
@@ -260,19 +272,33 @@ function logNotification(n) {
 }
 
 async function loadRecentNotifications() {
-  const { notifications } = await (await fetch("/api/notifications?limit=5")).json();
-  notifications.reverse().forEach(logNotification);
+  const { notifications } = await (await get(API.notifications)).json();
+  notifications.slice(0, 5).reverse().forEach((n) => { seen.add(n.seq); logNotification(n); });
+}
+
+const seen = new Set();
+
+// Static sites poll the published files; the server pushes over SSE.
+async function refreshStatic() {
+  await Promise.all([loadStatus(), loadEvents()]);
+  const { notifications } = await (await get(API.notifications)).json();
+  notifications.filter((n) => !seen.has(n.seq)).reverse().forEach((n) => { seen.add(n.seq); logNotification(n); });
 }
 
 function connect() {
+  if (STATIC) { setInterval(refreshStatic, 5 * 60e3); return; }
   const es = new EventSource("/api/stream");
   let pending = null;
   es.addEventListener("interval", () => { clearTimeout(pending); pending = setTimeout(loadStatus, 500); });
-  es.addEventListener("notification", (m) => { logNotification(JSON.parse(m.data)); loadEvents(); });
+  es.addEventListener("notification", (m) => { const n = JSON.parse(m.data); seen.add(n.seq); logNotification(n); loadEvents(); });
   es.onerror = () => { es.close(); setTimeout(connect, 10000); };
 }
 
 (async () => {
+  if (STATIC) {
+    $("log-h").textContent = "Recent notifications";
+    $("log-empty").textContent = "No notifications yet. This page refreshes every five minutes.";
+  }
   await Promise.all([loadStatus(), loadEvents(), loadRecentNotifications()]);
   const id = new URLSearchParams(location.search).get("event");
   if (id) openEvent(id, false);
@@ -281,7 +307,7 @@ function connect() {
     const b = ev.target.closest("button[data-copy]");
     if (b) navigator.clipboard.writeText(b.dataset.copy);
   });
-  setInterval(loadStatus, 60000);
+  if (!STATIC) setInterval(loadStatus, 60000);
   window.onpopstate = () => { const i = new URLSearchParams(location.search).get("event"); if (i) openEvent(i, false); };
 })();
 </script>

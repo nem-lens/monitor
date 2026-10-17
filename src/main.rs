@@ -5,6 +5,7 @@
 //!   nem-monitor -c config.toml replay DIR       run the detector over saved DispatchIS files
 //!   nem-monitor -c config.toml mark-data-ready DAY [--files DIR]   record next-day data
 //!   nem-monitor -c config.toml prune           trim the rolling buffer
+//!   nem-monitor -c config.toml once --state-in URL --site-out site/   static site (GitHub Pages)
 //!   nem-monitor -c config.toml check-config
 
 mod app;
@@ -16,6 +17,7 @@ mod ingest;
 mod model;
 mod nemweb;
 mod notify;
+mod site;
 mod store;
 mod time;
 mod triggers;
@@ -78,6 +80,19 @@ enum Cmd {
     },
     /// Drop buffered outcomes and raw zips older than store.buffer_hours.
     Prune,
+    /// Static-site mode (GitHub Pages): load state, poll once, write the site, exit.
+    Once {
+        /// Previous site to continue from: a directory or its public URL.
+        /// Without it the run starts fresh.
+        #[arg(long, value_name = "DIR|URL")]
+        state_in: Option<String>,
+        /// Where to write the site.
+        #[arg(long, value_name = "DIR")]
+        site_out: PathBuf,
+        /// Feed saved DispatchIS files instead of polling NEMWeb (for testing).
+        #[arg(long, value_name = "DIR")]
+        replay: Option<PathBuf>,
+    },
     /// Validate the configuration and exit.
     CheckConfig,
 }
@@ -160,6 +175,54 @@ async fn main() -> Result<()> {
                     .acquire_many(app.cfg.max_concurrent_triggers.unwrap_or(2).max(1) as u32)
                     .await;
             }
+            Ok(())
+        }
+        Cmd::Once {
+            state_in,
+            site_out,
+            replay,
+        } => {
+            let mut cfg = cfg;
+            // No persistent disk between runs: keep the raw buffer and bundles
+            // in a scratch directory that is not published.
+            let scratch =
+                std::env::temp_dir().join(format!("nem-monitor-once-{}", std::process::id()));
+            cfg.store.raw_dir = scratch.join("raw").to_string_lossy().into();
+            cfg.store.bundle_dir = scratch.join("bundles").to_string_lossy().into();
+            let mut app = app::App::new(cfg, store::open(":memory:")?, "static")?;
+            // ntfy only (no webhooks are registered in static mode); no local pipeline.
+            app.fire_triggers = false;
+            app.echo = true;
+            let prior = match &state_in {
+                Some(src) => site::load_state(src, &app.cfg.source.user_agent).await?,
+                None => None,
+            };
+            match &prior {
+                Some(s) => {
+                    site::import(&app, s)?;
+                    println!(
+                        "continuing from state of {} ({} events, {} notifications)",
+                        s.generated_at,
+                        s.events.len(),
+                        s.notifications.len()
+                    );
+                }
+                None => println!("no previous state; starting fresh"),
+            }
+            let n = match &replay {
+                Some(dir) => ingest::replay_dir(&app, dir, std::time::Duration::ZERO).await?,
+                None => ingest::poll_once(&app).await?,
+            };
+            let state = site::write_site(&app, &site_out)?;
+            println!(
+                "processed {n} new reports; wrote site to {} ({} events, {} intervals buffered)",
+                site_out.display(),
+                state.events.len(),
+                state.intervals.len()
+            );
+            // Let ntfy pushes finish before exiting.
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            std::fs::remove_dir_all(&scratch).ok();
             Ok(())
         }
         Cmd::Prune => {

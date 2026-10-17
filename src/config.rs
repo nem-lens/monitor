@@ -170,6 +170,9 @@ pub struct PublicCfg {
     pub max_sse_connections: usize,
     /// Requests per client IP per minute across the API and feeds; 0 disables.
     pub api_requests_per_ip_per_minute: u32,
+    /// owner/name of the GitHub repo that hosts the static site, for the page's
+    /// subscribe instructions (Watch for Discussions and Releases); empty hides them.
+    pub github_repo: String,
 }
 
 impl Default for PublicCfg {
@@ -188,6 +191,7 @@ impl Default for PublicCfg {
             feed_items: 50,
             max_sse_connections: 200,
             api_requests_per_ip_per_minute: 120,
+            github_repo: String::new(),
         }
     }
 }

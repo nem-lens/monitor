@@ -125,11 +125,16 @@ fn internal(e: anyhow::Error) -> ApiError {
     ApiError(500, "internal error".into())
 }
 
+/// The public page. A static build reads `data/*.json` instead of the API
+/// and has no live stream or webhook form.
+pub fn render_index(cfg: &crate::config::Config, static_site: bool) -> String {
+    INDEX
+        .replace("{{SITE_TITLE}}", &feeds::xml_escape(&cfg.public.site_title))
+        .replace("{{STATIC}}", if static_site { "true" } else { "false" })
+}
+
 async fn index(State(app): State<App>) -> Html<String> {
-    Html(INDEX.replace(
-        "{{SITE_TITLE}}",
-        &feeds::xml_escape(&app.cfg.public.site_title),
-    ))
+    Html(render_index(&app.cfg, false))
 }
 
 async fn healthz(State(app): State<App>) -> Response {
@@ -143,6 +148,11 @@ async fn healthz(State(app): State<App>) -> Response {
 }
 
 async fn status(State(app): State<App>) -> Result<Json<serde_json::Value>, ApiError> {
+    status_json(&app, false).map(Json).map_err(internal)
+}
+
+/// The `/api/status` document; `static_site` drops the live-only channels.
+pub fn status_json(app: &App, static_site: bool) -> anyhow::Result<serde_json::Value> {
     let cfg = app.cfg.clone();
     let health = app.health.read().map(|h| h.clone()).unwrap_or_default();
     let (latest, regions, open) = app
@@ -167,8 +177,7 @@ async fn status(State(app): State<App>) -> Result<Json<serde_json::Value>, ApiEr
                 }));
             }
             Ok((latest, regions, open))
-        })
-        .map_err(internal)?;
+        })?;
     let base = cfg.server.public_url.trim_end_matches('/');
     let ntfy = if cfg.public.ntfy_topic.trim().is_empty() {
         serde_json::Value::Null
@@ -179,9 +188,11 @@ async fn status(State(app): State<App>) -> Result<Json<serde_json::Value>, ApiEr
             "url": format!("{}/{}", cfg.public.ntfy_server.trim_end_matches('/'), cfg.public.ntfy_topic),
         })
     };
-    Ok(Json(serde_json::json!({
+    let github = cfg.public.github_repo.trim();
+    Ok(serde_json::json!({
         "site_title": cfg.public.site_title,
-        "mode": health.mode,
+        "mode": if static_site { "static" } else { health.mode.as_str() },
+        "generated_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         "fresh": health.is_fresh(chrono::Utc::now()),
         "latest_interval": latest,
         "health": health,
@@ -198,11 +209,12 @@ async fn status(State(app): State<App>) -> Result<Json<serde_json::Value>, ApiEr
         "subscribe": {
             "atom": format!("{base}/feed.atom"),
             "json_feed": format!("{base}/feed.json"),
-            "sse": format!("{base}/api/stream"),
+            "sse": (!static_site).then(|| format!("{base}/api/stream")),
             "ntfy": ntfy,
-            "webhooks": cfg.public.webhooks_enabled.then(|| format!("{base}/api/webhooks")),
+            "webhooks": (cfg.public.webhooks_enabled && !static_site).then(|| format!("{base}/api/webhooks")),
+            "github": (!github.is_empty()).then(|| format!("https://github.com/{github}")),
         },
-    })))
+    }))
 }
 
 #[derive(Deserialize)]
@@ -236,9 +248,16 @@ async fn event_detail(
     State(app): State<App>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let out = app
-        .with_db(|c| {
-            let Some(ev) = store::get_event(c, &id)? else {
+    event_detail_json(&app, &id)
+        .map_err(internal)?
+        .map(Json)
+        .ok_or_else(|| ApiError(404, "event not found".into()))
+}
+
+/// The `/api/events/{id}` document, or `None` for unknown and discarded events.
+pub fn event_detail_json(app: &App, id: &str) -> anyhow::Result<Option<serde_json::Value>> {
+    app.with_db(|c| {
+            let Some(ev) = store::get_event(c, id)? else {
                 return Ok(None);
             };
             if ev.status == crate::model::Status::Discarded {
@@ -252,7 +271,7 @@ async fn event_detail(
                 + chrono::Duration::hours(1);
             // A written bundle is the record once the event closes (the buffer
             // is pruned after 48 h); while the event is open, use the buffer.
-            let bundle = store::get_bundle(c, &id)?.filter(|b| b.status != "pending");
+            let bundle = store::get_bundle(c, id)?.filter(|b| b.status != "pending");
             let from_bundle = bundle.as_ref().and_then(|b| {
                 crate::bundle::read_series(std::path::Path::new(&b.path), &ev.region)
                     .map_err(|e| tracing::warn!(event = %id, "reading bundle: {e:#}"))
@@ -270,7 +289,7 @@ async fn event_detail(
                     "buffer",
                 ),
             };
-            let notes = store::notifications_for_event(c, &id, true)?;
+            let notes = store::notifications_for_event(c, id, true)?;
             Ok(Some(serde_json::json!({
                 "event": ev,
                 "series": series,
@@ -279,9 +298,6 @@ async fn event_detail(
                 "notifications": notes,
             })))
         })
-        .map_err(internal)?;
-    out.map(Json)
-        .ok_or_else(|| ApiError(404, "event not found".into()))
 }
 
 #[derive(Deserialize)]

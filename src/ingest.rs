@@ -379,6 +379,16 @@ pub async fn run(app: App) {
     }
 }
 
+/// One pass of the live loop, for `once`: new DispatchIS files since the
+/// last processed interval (within `backfill_hours`), then next-day data.
+pub async fn poll_once(app: &App) -> Result<usize> {
+    let engine = AsyncMutex::new(Engine::load(app)?);
+    let client = nemweb::client(&app.cfg.source.user_agent)?;
+    let n = poll_dispatch(app, &engine, &client).await?;
+    poll_data_ready(app, &client).await?;
+    Ok(n)
+}
+
 /// Poll ticks to skip after `failures` consecutive errors: 1, 2, 4, 8, then 15
 /// (about five minutes at the default 20 s poll).
 pub fn backoff_ticks(failures: u32) -> u32 {

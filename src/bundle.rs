@@ -208,41 +208,45 @@ impl TableBuf {
             .map(move |r| r.get(i).and_then(|v| v.as_deref()))
     }
 
-    /// Infer a type per column and build an Arrow batch.
+    /// Infer a type per column and build an Arrow batch. Numbers are Float64
+    /// unless the column is a key or count ([`integer_column`]), so a column
+    /// has the same type in every bundle whatever values a window held.
     pub fn to_batch(&self) -> Result<RecordBatch> {
         let mut fields = Vec::new();
         let mut arrays: Vec<ArrayRef> = Vec::new();
         for (i, name) in self.columns.iter().enumerate() {
             let present: Vec<&str> = self.values(i).flatten().collect();
-            let (dt, arr): (DataType, ArrayRef) =
-                if !present.is_empty() && present.iter().all(|v| v.parse::<i64>().is_ok()) {
-                    let a: Int64Array = self
-                        .values(i)
-                        .map(|v| v.and_then(|s| s.parse().ok()))
-                        .collect();
-                    (DataType::Int64, Arc::new(a))
-                } else if !present.is_empty() && present.iter().all(|v| v.parse::<f64>().is_ok()) {
-                    let a: Float64Array = self
-                        .values(i)
-                        .map(|v| v.and_then(|s| s.parse().ok()))
-                        .collect();
-                    (DataType::Float64, Arc::new(a))
-                } else if !present.is_empty() && present.iter().all(|v| parse_market(v).is_some()) {
-                    let a: TimestampMillisecondArray = self
-                        .values(i)
-                        .map(|v| {
-                            v.and_then(parse_market)
-                                .map(|t| t.and_utc().timestamp_millis())
-                        })
-                        .collect();
-                    (
-                        DataType::Timestamp(TimeUnit::Millisecond, None),
-                        Arc::new(a),
-                    )
-                } else {
-                    let a: StringArray = self.values(i).collect();
-                    (DataType::Utf8, Arc::new(a))
-                };
+            let (dt, arr): (DataType, ArrayRef) = if integer_column(name)
+                && !present.is_empty()
+                && present.iter().all(|v| v.parse::<i64>().is_ok())
+            {
+                let a: Int64Array = self
+                    .values(i)
+                    .map(|v| v.and_then(|s| s.parse().ok()))
+                    .collect();
+                (DataType::Int64, Arc::new(a))
+            } else if !present.is_empty() && present.iter().all(|v| v.parse::<f64>().is_ok()) {
+                let a: Float64Array = self
+                    .values(i)
+                    .map(|v| v.and_then(|s| s.parse().ok()))
+                    .collect();
+                (DataType::Float64, Arc::new(a))
+            } else if !present.is_empty() && present.iter().all(|v| parse_market(v).is_some()) {
+                let a: TimestampMillisecondArray = self
+                    .values(i)
+                    .map(|v| {
+                        v.and_then(parse_market)
+                            .map(|t| t.and_utc().timestamp_millis())
+                    })
+                    .collect();
+                (
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    Arc::new(a),
+                )
+            } else {
+                let a: StringArray = self.values(i).collect();
+                (DataType::Utf8, Arc::new(a))
+            };
             fields.push(Field::new(name, dt, true));
             arrays.push(arr);
         }
@@ -262,6 +266,26 @@ impl TableBuf {
         fs::write(path, &buf).with_context(|| format!("writing {}", path.display()))?;
         Ok(sha256_hex(&buf))
     }
+}
+
+/// AEMO columns that are identifiers, run numbers, flags or period indexes:
+/// stored as Int64. Every other numeric column is Float64.
+pub fn integer_column(name: &str) -> bool {
+    matches!(
+        name,
+        "RUNNO"
+            | "INTERVENTION"
+            | "DISPATCHINTERVAL"
+            | "PERIODID"
+            | "PERIODIDTO"
+            | "DISPATCHMODE"
+            | "AGCSTATUS"
+            | "SEMIDISPATCHCAP"
+            | "APCFLAG"
+            | "MARKETSUSPENDEDFLAG"
+            | "RECALL_PERIOD"
+    ) || name.ends_with("VERSIONNO")
+        || name.ends_with("_FLAG")
 }
 
 /// A raw DispatchIS zip in the buffer.
@@ -557,7 +581,12 @@ mod tests {
     fn column_types_are_inferred_and_headers_unioned() {
         let mut buf = TableBuf::default();
         buf.add(&Table {
-            columns: vec!["SETTLEMENTDATE".into(), "N".into(), "X".into(), "S".into()],
+            columns: vec![
+                "SETTLEMENTDATE".into(),
+                "RUNNO".into(),
+                "X".into(),
+                "S".into(),
+            ],
             rows: vec![
                 vec![
                     "2026/10/12 14:35:00".into(),
@@ -589,15 +618,16 @@ mod tests {
                 "SETTLEMENTDATE",
                 DataType::Timestamp(TimeUnit::Millisecond, None),
             ),
-            ("N", DataType::Int64),
+            ("RUNNO", DataType::Int64),
             ("X", DataType::Float64),
             ("S", DataType::Utf8),
-            ("NEW", DataType::Int64),
+            // Whole values in an ordinary column still get the stable float type.
+            ("NEW", DataType::Float64),
         ]
         .map(|(n, d)| (n.to_string(), d));
         assert_eq!(types, expected);
         assert_eq!(b.num_rows(), 3);
-        let n = column::<Int64Array>(&b, "N").unwrap();
+        let n = column::<Int64Array>(&b, "RUNNO").unwrap();
         assert!(n.is_null(1) && n.is_null(2) && n.value(0) == 1);
     }
 
