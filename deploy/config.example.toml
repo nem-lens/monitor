@@ -71,7 +71,7 @@ timeout_secs = 1800
 [[triggers]]
 name = "full-brief"
 on = ["data_ready"]
-command = ["/opt/nemcf/bin/nemcf", "replay", "--bundle", "{bundle}", "--out", "{bundle}/replay"]
+command = ["/opt/nemcf/bin/nemcf", "replay", "--bundle", "{bundle}", "--scenario", "/opt/nemcf/scenarios", "--out", "{bundle}/replay"]
 timeout_secs = 3600
 
 # Or hand off to a job queue instead of running locally.

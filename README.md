@@ -87,11 +87,11 @@ name = "full-brief"
 on = ["data_ready"]                 # opened confirmed escalated flagged closed discarded data_ready
 min_severity = "high"
 regions = ["NSW1"]                  # optional
-command = ["/opt/nemcf/bin/nemcf", "replay", "--bundle", "{bundle}", "--out", "{bundle}/replay"]
+command = ["/opt/nemcf/bin/nemcf", "replay", "--bundle", "{bundle}", "--scenario", "/opt/nemcf/scenarios", "--out", "{bundle}/replay"]
 timeout_secs = 3600
 ```
 
-Commands run directly (no shell). The notification JSON is on stdin; `NEM_EVENT_ID`, `NEM_REGION`, `NEM_TRANSITION`, `NEM_DATA_TIER`, `NEM_TRADING_DAY`, `NEM_SEVERITY`, `NEM_EVENT_START`, `NEM_EVENT_END` and `NEM_BUNDLE` are set; placeholders `{event_id}` `{region}` `{transition}` `{data_tier}` `{trading_day}` `{severity}` `{start}` `{end}` `{bundle}` are substituted in argv. At `data_ready` the event's bundle is complete (next-day data, and MMSDM equations when `store.mmsdm_dir` is set) before triggers run, so the replay engine can read it: `nemcf replay --bundle {bundle} --out {bundle}/replay`. A trigger can instead POST to an internal `webhook` signed with the secret in `secret_env`. Runs are logged; set `NEM_ADMIN_TOKEN` to read them at `GET /api/admin/runs`.
+Commands run directly (no shell). The notification JSON is on stdin; `NEM_EVENT_ID`, `NEM_REGION`, `NEM_TRANSITION`, `NEM_DATA_TIER`, `NEM_TRADING_DAY`, `NEM_SEVERITY`, `NEM_EVENT_START`, `NEM_EVENT_END` and `NEM_BUNDLE` are set; placeholders `{event_id}` `{region}` `{transition}` `{data_tier}` `{trading_day}` `{severity}` `{start}` `{end}` `{bundle}` are substituted in argv. At `data_ready` the event's bundle is complete (next-day data, and MMSDM equations when `store.mmsdm_dir` is set) before triggers run, so the replay engine can read it: `nemcf replay --bundle {bundle} --scenario /opt/nemcf/scenarios --out {bundle}/replay` runs the baseline and every scenario in the folder (about 30 s for 12 Oct) and writes prices.csv, summary.txt, one solution per scenario and skipped.txt. A trigger can instead POST to an internal `webhook` signed with the secret in `secret_env`. Runs are logged; set `NEM_ADMIN_TOKEN` to read them at `GET /api/admin/runs`.
 
 ## Public subscriptions
 
