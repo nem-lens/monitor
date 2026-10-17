@@ -69,6 +69,8 @@ Trigger commands on Windows use `powershell -Command ...` instead of `sh -c ...`
 - **Public notifications** only for confirmed, escalated, flagged, closed and data_ready; `opened` and `discarded` stay internal.
 - **Triggers never use a shell**, and placeholders come from internally generated fields only.
 - **MPC is config**, currently $23,200/MWh for 2026-27; update each July.
+- **Store event data only.** AEMO's NEMWeb and MMSDM archives are the ground truth for all history; do not mirror them. Keep a 48-hour rolling buffer of dispatch outcomes for detection context, plus a Parquet *event bundle* per confirmed event (window: start minus 2 h to end plus 1 h; bids, unit dispatch and invoked constraint equations sliced to that window). Each bundle has a manifest of AEMO source file names, URLs and SHA-256 hashes. Discarded events keep nothing.
+- **SQLite for operational state, Parquet for event bundles, DuckDB for analysis.** DuckDB reads the bundles with no locks; do not make DuckDB the monitor's live database (single-writer file locking blocks concurrent analysis).
 
 ## 5. Backlog (priority order, with acceptance criteria)
 
@@ -80,6 +82,15 @@ Trigger commands on Windows use `powershell -Command ...` instead of `sh -c ...`
    - **Accept when:** `data_ready` table fills for both directories each morning after about 04:15 AEST.
 4. Validate detection on real history: fetch archived DispatchIS files for 12 October 2026 (NEMWeb Archive or MMSDM) and replay.
    - **Accept when:** an event confirms in NSW1 with peak $23,107/MWh and 11 intervals above $5,000, matching ABC and AEMO figures.
+
+### P1a. Event-only retention (owner decision, 17 Oct 2026)
+1. Replace `store.retain_days` with `store.buffer_hours = 48`; prune `region_intervals` and `seen_files` to that window.
+2. On `confirmed`, start capturing the event window; on `closed`, write `bundles/<event_id>/` containing `dispatch_price.parquet`, `dispatch_regionsum.parquet`, `dispatch_constraint.parquet`, `dispatch_interconnectorres.parquet` and `manifest.json` (source files, URLs, SHA-256). Use the pure-Rust `arrow` and `parquet` crates.
+3. Keep the raw DispatchIS zips for the window until the bundle is written (Current folders hold only about two days).
+4. At `data_ready`, download the next-day files once, slice to the window, append `bids.parquet` and `unit_dispatch.parquet`, then discard the full files.
+5. The event detail API reads the bundle (or the buffer while the event is open).
+6. Add `docs/duckdb-queries.md` with example queries over `bundles/*/`.
+   - **Accept when:** after a fixture replay plus `mark-data-ready`, only the bundle and a 48-hour buffer remain; a DuckDB query over the bundle reproduces the event's peak and interval counts; manifest hashes match the source zips.
 
 ### P1. Hardening
 1. `public.webhooks_enabled = false` switch (route returns 404 when off).
