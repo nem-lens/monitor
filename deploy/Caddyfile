@@ -1,0 +1,15 @@
+# Caddy terminates TLS (automatic certificates) and proxies to nem-monitor on localhost.
+nem.example.org {
+	encode gzip
+	# Live stream: disable buffering so events arrive immediately.
+	@stream path /api/stream
+	reverse_proxy @stream 127.0.0.1:8080 {
+		flush_interval -1
+	}
+	reverse_proxy 127.0.0.1:8080
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+	}
+}

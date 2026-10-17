@@ -1,0 +1,27 @@
+[Unit]
+Description=NEM event monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nem
+Group=nem
+ExecStart=/usr/local/bin/nem-monitor -c /etc/nem-monitor/config.toml serve
+Restart=always
+RestartSec=5
+Environment=RUST_LOG=nem_monitor=info
+# Optional: token for GET /api/admin/runs (16+ chars)
+EnvironmentFile=-/etc/nem-monitor/env
+StateDirectory=nem-monitor
+WorkingDirectory=/var/lib/nem-monitor
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/nem-monitor
+# Triggers that write elsewhere need those paths added here.
+
+[Install]
+WantedBy=multi-user.target

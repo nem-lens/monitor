@@ -1,0 +1,76 @@
+# nem-monitor configuration. Every value shown is the default unless noted.
+
+max_concurrent_triggers = 2
+
+[server]
+bind = "127.0.0.1:8080"                 # keep on localhost; Caddy terminates TLS in front
+public_url = "https://nem.example.org"  # CHANGE: used in feeds and notification links
+trust_proxy_headers = true              # true only behind your own reverse proxy
+
+[source]
+base_url = "https://nemweb.com.au/Reports/Current"
+dispatch_dir = "DispatchIS_Reports"
+poll_secs = 20
+backfill_hours = 6
+user_agent = "nem-monitor/0.1 (+https://nem.example.org; ops@example.org)"  # CHANGE: identify yourself to AEMO
+data_ready_poll_secs = 600
+data_ready_dirs = ["Next_Day_Dispatch", "Next_Day_Offer_Energy"]
+
+[store]
+path = "/var/lib/nem-monitor/nem-monitor.db"
+retain_days = 90
+
+[detect]
+regions = ["NSW1", "QLD1", "VIC1", "SA1", "TAS1"]
+market_price_cap = 23200.0        # AEMC MPC for 1 Jul 2026 to 30 Jun 2027; update each July
+high_price = 5000.0
+extreme_price = 10000.0
+cap_fraction = 0.95
+confirm_intervals = 3
+confirm_immediately_price = 15000.0
+close_price = 1000.0
+quiet_intervals = 6
+floor_price = -900.0
+whiplash_step = 1000.0
+whiplash_reversals = 3
+whiplash_window = 12
+separation_price = 5000.0
+demand_ramp_mw = 1500.0
+demand_ramp_window = 12
+
+[public]
+site_title = "NEM Event Monitor"
+min_severity = "high"             # high | extreme | cap
+include_low_price = true
+ntfy_server = "https://ntfy.sh"
+ntfy_topic = ""                   # e.g. "nem-events-yourname"; empty disables push
+max_webhooks = 1000
+allow_http_webhooks = false
+webhook_registrations_per_ip_per_hour = 5
+webhook_disable_after_failures = 10
+feed_items = 50
+
+# Operator triggers run the rest of the pipeline. Commands run without a shell;
+# the notification JSON arrives on stdin and as NEM_* environment variables.
+
+# Live replay as soon as an event closes (outcomes-only data tier).
+[[triggers]]
+name = "replay-live"
+on = ["closed"]
+min_severity = "high"
+command = ["/opt/nemcf/bin/nemcf", "replay", "--event", "{event_id}", "--tier", "{data_tier}"]
+timeout_secs = 1800
+
+# Full replay, counterfactuals and media brief once bids are public (~04:15 next day).
+[[triggers]]
+name = "full-brief"
+on = ["data_ready"]
+command = ["/opt/nemcf/bin/nemcf", "report", "--event", "{event_id}", "--trading-day", "{trading_day}"]
+timeout_secs = 3600
+
+# Or hand off to a job queue instead of running locally.
+# [[triggers]]
+# name = "queue"
+# on = ["confirmed", "closed", "data_ready"]
+# webhook = "http://127.0.0.1:9000/jobs"
+# secret_env = "NEM_TRIGGER_SECRET"

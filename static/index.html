@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{SITE_TITLE}}</title>
+<link rel="alternate" type="application/atom+xml" title="{{SITE_TITLE}}" href="/feed.atom">
+<link rel="alternate" type="application/feed+json" title="{{SITE_TITLE}}" href="/feed.json">
+<style>
+:root {
+  --bg: #f7f6f2; --panel: #ffffff; --ink: #1d1c1a; --muted: #6b6860; --line: #e3e0d8;
+  --accent: #b4410f; --accent-soft: #fbe9df; --ok: #2f6b3a; --warn: #a86b00; --crit: #b4231b;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #151513; --panel: #1e1e1b; --ink: #ecebe6; --muted: #9c998f; --line: #34332f;
+          --accent: #f08a4b; --accent-soft: #3a2418; --ok: #6fbf7c; --warn: #e0a94a; --crit: #f0645a; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+       font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 24px 16px 64px; }
+header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 32px 0 12px; font-weight: 600; }
+.status { font-size: 13px; color: var(--muted); }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 6px; vertical-align: 1px; }
+.dot.live { background: var(--ok); } .dot.stale { background: var(--crit); }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 14px 10px; }
+.card .name { font-size: 13px; color: var(--muted); display: flex; justify-content: space-between; }
+.card .price { font-size: 26px; font-weight: 650; font-variant-numeric: tabular-nums; margin: 2px 0 4px; }
+.card .price small { font-size: 12px; font-weight: 400; color: var(--muted); }
+.card.hot { border-color: var(--accent); background: var(--accent-soft); }
+.card svg { display: block; width: 100%; height: 36px; }
+.badge { display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 99px;
+         border: 1px solid currentColor; text-transform: uppercase; letter-spacing: 0.04em; }
+.sev-high { color: var(--warn); } .sev-extreme, .sev-cap { color: var(--crit); } .sev-floor { color: var(--ok); }
+.list { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.row { display: grid; grid-template-columns: 1fr auto; gap: 4px 16px; padding: 12px 14px; border-top: 1px solid var(--line); cursor: pointer; }
+.row:first-child { border-top: 0; } .row:hover { background: var(--bg); }
+.row .t { font-weight: 600; } .row .m { color: var(--muted); font-size: 13px; }
+.row .p { font-variant-numeric: tabular-nums; font-weight: 600; text-align: right; }
+.empty { padding: 18px 14px; color: var(--muted); }
+#detail { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; display: none; }
+#detail h3 { margin: 0 0 4px; font-size: 18px; }
+#detail .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 14px 0; }
+#detail .fact { border-left: 3px solid var(--line); padding-left: 10px; }
+#detail .fact b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
+#detail .fact span { font-size: 12px; color: var(--muted); }
+#chart { width: 100%; height: auto; display: block; }
+.timeline { margin: 12px 0 0; padding: 0; list-style: none; font-size: 14px; }
+.timeline li { padding: 6px 0; border-top: 1px dashed var(--line); }
+.timeline li b { font-weight: 600; }
+.sub { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
+.box { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+.box h4 { margin: 0 0 6px; font-size: 15px; }
+.box p { margin: 0 0 10px; color: var(--muted); font-size: 14px; }
+code, .copy { font-family: var(--mono); font-size: 12.5px; }
+.copy { display: flex; gap: 6px; align-items: center; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; overflow-x: auto; white-space: nowrap; }
+.copy span { flex: 1; } button { font: inherit; font-size: 13px; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+input, select { font: inherit; font-size: 14px; width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink); margin-bottom: 8px; }
+pre { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 10px; overflow-x: auto; font-size: 12px; margin: 8px 0 0; }
+#log { font-size: 13px; }
+#log div { padding: 6px 0; border-top: 1px dashed var(--line); }
+footer { margin-top: 40px; font-size: 12px; color: var(--muted); }
+.result { font-size: 13px; margin-top: 8px; }
+.result.err { color: var(--crit); }
+@media (max-width: 560px) { .card .price { font-size: 22px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>{{SITE_TITLE}}</h1>
+    <div class="status" id="status"><span class="dot"></span>Connecting…</div>
+  </header>
+  <p class="status" style="margin-top:6px">Automatic detection of price events in the National Electricity Market from AEMO's 5-minute dispatch data. Times are local to each region.</p>
+
+  <h2>Spot prices now ($/MWh)</h2>
+  <div class="cards" id="cards"></div>
+
+  <h2 id="detail-h" style="display:none">Event</h2>
+  <div id="detail"></div>
+
+  <h2>Recent events</h2>
+  <div class="list" id="events"><div class="empty">Loading…</div></div>
+
+  <h2>Live notifications</h2>
+  <div class="box"><div id="log"><span class="status" id="log-empty">Waiting for the next notification. This panel updates live.</span></div></div>
+
+  <h2>Subscribe</h2>
+  <div class="sub" id="subscribe"></div>
+
+  <footer>
+    Detection is automatic and preliminary; figures come from AEMO dispatch outcomes as published and may be revised.
+    Source data © AEMO, used under AEMO's copyright permissions. This service is not affiliated with AEMO. Not financial advice.
+  </footer>
+</div>
+
+<script>
+const TZ = { NSW1: "Australia/Sydney", VIC1: "Australia/Melbourne", QLD1: "Australia/Brisbane", SA1: "Australia/Adelaide", TAS1: "Australia/Hobart" };
+const NAME = { NSW1: "NSW", VIC1: "Victoria", QLD1: "Queensland", SA1: "South Australia", TAS1: "Tasmania" };
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const money = (v) => v == null ? "–" : v === 0 ? "0" : (Math.abs(v) >= 100 ? Math.round(v).toLocaleString("en-AU") : v.toFixed(2));
+const localTime = (iso, region) => iso ? new Date(iso).toLocaleTimeString("en-AU", { timeZone: TZ[region] || "Australia/Brisbane", hour: "numeric", minute: "2-digit", timeZoneName: "short" }) : "";
+const localDate = (iso, region) => iso ? new Date(iso).toLocaleDateString("en-AU", { timeZone: TZ[region] || "Australia/Brisbane", weekday: "short", day: "numeric", month: "short" }) : "";
+let thresholds = { high_price: 5000, market_price_cap: 23200 };
+
+function spark(series) {
+  if (!series || series.length < 2) return "";
+  const w = 160, h = 36, max = Math.max(...series, 300), min = Math.min(...series, 0);
+  const pts = series.map((v, i) => `${(i / (series.length - 1) * w).toFixed(1)},${(h - 2 - (v - min) / (max - min) * (h - 4)).toFixed(1)}`).join(" ");
+  return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true"><polyline points="${pts}" fill="none" stroke="currentColor" stroke-width="1.5" vector-effect="non-scaling-stroke"/></svg>`;
+}
+
+async function loadStatus() {
+  const s = await (await fetch("/api/status")).json();
+  thresholds = s.thresholds;
+  const h = s.health || {};
+  const fresh = s.mode !== "live" || (h.last_poll_ok && (Date.now() - new Date(h.last_poll_ok)) < 10 * 60e3);
+  const last = s.latest_interval ? `latest interval ${localTime(s.latest_interval, "NSW1")} ${localDate(s.latest_interval, "NSW1")}` : "no data yet";
+  $("status").innerHTML = `<span class="dot ${fresh ? "live" : "stale"}"></span>${s.mode === "live" ? (fresh ? "Live" : "Feed delayed") : esc(s.mode)} · ${esc(last)}`;
+  $("cards").innerHTML = s.regions.map((r) => `
+    <div class="card ${r.rrp != null && r.rrp >= thresholds.high_price ? "hot" : ""}">
+      <div class="name"><span>${esc(r.name)}</span>${r.open_event ? `<a href="?event=${encodeURIComponent(r.open_event)}" class="badge sev-high">event</a>` : ""}</div>
+      <div class="price">${r.rrp == null ? "–" : "$" + money(r.rrp)} <small>${esc(r.local_time || "")}</small></div>
+      ${spark(r.series)}
+    </div>`).join("");
+  renderSubscribe(s.subscribe);
+}
+
+function eventRow(e) {
+  const when = `${localDate(e.start, e.region)} ${localTime(e.start, e.region)}${e.end ? " – " + localTime(e.end, e.region) : " (ongoing)"}`;
+  const flags = (e.flags || []).map((f) => f.kind.replace("_", " ")).join(", ");
+  const label = e.kind === "low_price" ? "Low prices" : "Price spike";
+  return `<div class="row" data-id="${esc(e.id)}">
+    <div><div class="t">${esc(NAME[e.region] || e.region)} · ${label} <span class="badge sev-${e.severity}">${esc(e.severity)}</span></div>
+      <div class="m">${esc(when)} · ${e.intervals_above_high} intervals beyond threshold${flags ? " · " + esc(flags) : ""}</div></div>
+    <div class="p">$${money(e.peak_price)}<div class="m">${e.kind === "low_price" ? "lowest" : "peak"}</div></div>
+  </div>`;
+}
+
+async function loadEvents() {
+  const { events } = await (await fetch("/api/events?limit=30")).json();
+  $("events").innerHTML = events.length ? events.map(eventRow).join("") : `<div class="empty">No events detected yet.</div>`;
+  document.querySelectorAll("#events .row").forEach((el) => el.onclick = () => openEvent(el.dataset.id, true));
+}
+
+function chart(series, ev) {
+  if (!series.length) return "";
+  const W = 720, H = 240, L = 56, R = 12, T = 12, B = 28;
+  const xs = series.map((p) => new Date(p.t).getTime());
+  const vs = series.map((p) => p.rrp);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs);
+  const vmax = Math.max(...vs, thresholds.high_price * 1.1), vmin = Math.min(0, ...vs);
+  const X = (t) => L + (t - x0) / Math.max(1, x1 - x0) * (W - L - R);
+  const Y = (v) => T + (1 - (v - vmin) / (vmax - vmin)) * (H - T - B);
+  const step = [1000, 2000, 5000, 10000, 20000].find((s) => vmax / s <= 6) || 50000;
+  let g = "";
+  for (let v = 0; v <= vmax; v += step) g += `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--line)"/><text x="${L - 6}" y="${Y(v) + 4}" text-anchor="end" font-size="11" fill="var(--muted)">$${money(v)}</text>`;
+  const s0 = new Date(ev.start).getTime() - 5 * 60e3, s1 = new Date(ev.end || ev.last_active).getTime();
+  const band = `<rect x="${X(s0)}" y="${T}" width="${Math.max(2, X(s1) - X(s0))}" height="${H - T - B}" fill="var(--accent-soft)"/>`;
+  const thr = `<line x1="${L}" x2="${W - R}" y1="${Y(thresholds.high_price)}" y2="${Y(thresholds.high_price)}" stroke="var(--warn)" stroke-dasharray="4 4"/>`;
+  const pts = series.map((p) => `${X(new Date(p.t).getTime()).toFixed(1)},${Y(p.rrp).toFixed(1)}`).join(" ");
+  let ticks = "";
+  const n = Math.min(6, series.length);
+  for (let i = 0; i < n; i++) {
+    const p = series[Math.round(i * (series.length - 1) / Math.max(1, n - 1))];
+    ticks += `<text x="${X(new Date(p.t).getTime())}" y="${H - 8}" text-anchor="middle" font-size="11" fill="var(--muted)">${esc(localTime(p.t, ev.region).replace(/ [A-Z]+$/, ""))}</text>`;
+  }
+  return `<svg id="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Spot price around the event">${band}${g}${thr}<polyline points="${pts}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round"/>${ticks}</svg>`;
+}
+
+async function openEvent(id, push) {
+  const r = await fetch(`/api/events/${encodeURIComponent(id)}`);
+  if (!r.ok) return;
+  const { event: e, series, notifications } = await r.json();
+  if (push) history.pushState(null, "", `?event=${encodeURIComponent(id)}`);
+  const low = e.kind === "low_price";
+  const cons = (e.constraints || []).slice(0, 3).map((c) => `${esc(c.id)} (${c.binding_intervals})`).join(", ") || "none recorded";
+  const ics = (e.interconnectors_at_limit || []).map((c) => `${esc(c.id)} ${esc(c.direction)} (${c.intervals_at_limit})`).join(", ") || "none";
+  $("detail-h").style.display = "block";
+  $("detail").style.display = "block";
+  $("detail").innerHTML = `
+    <h3>${esc(NAME[e.region] || e.region)} · ${low ? "Low prices" : "Price spike"} <span class="badge sev-${e.severity}">${esc(e.severity)}</span></h3>
+    <div class="status">${esc(localDate(e.start, e.region))}, ${esc(localTime(e.start, e.region))} to ${e.end ? esc(localTime(e.end, e.region)) : "ongoing"} · status ${esc(e.status)} · data ${esc(e.data_tier.replace("_", " "))}</div>
+    <div class="facts">
+      <div class="fact"><b>$${money(e.peak_price)}</b><span>${low ? "lowest" : "peak"} at ${esc(localTime(e.peak_interval, e.region))}</span></div>
+      <div class="fact"><b>${e.intervals_above_high}</b><span>intervals ${low ? "at or below $" + money(thresholds.floor_price) : "above $" + money(thresholds.high_price)}</span></div>
+      <div class="fact"><b>$${money(e.mean_price)}</b><span>average over event</span></div>
+      <div class="fact"><b>${e.demand_peak ? Math.round(e.demand_peak).toLocaleString("en-AU") + " MW" : "–"}</b><span>peak demand</span></div>
+    </div>
+    ${chart(series, e)}
+    <p class="status" style="margin:10px 0 0">Binding constraints: ${cons}<br>Interconnectors at limit: ${ics}</p>
+    <ul class="timeline">${notifications.map((n) => `<li><b>${esc(n.title)}</b><br><span class="status">${esc(n.summary)}</span></li>`).join("")}</ul>`;
+  $("detail-h").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function copyRow(label, value) {
+  return `<div class="copy"><span>${esc(value)}</span><button onclick="navigator.clipboard.writeText('${esc(value)}')">Copy</button></div>`;
+}
+
+function renderSubscribe(sub) {
+  if ($("subscribe").dataset.done) return;
+  $("subscribe").dataset.done = "1";
+  const ntfy = sub.ntfy ? `
+    <div class="box"><h4>Phone push (ntfy)</h4>
+      <p>Install the free ntfy app and subscribe to this topic. No account needed.</p>
+      ${copyRow("topic", sub.ntfy.topic)}<p style="margin-top:8px">Server: <code>${esc(sub.ntfy.server)}</code></p></div>` : "";
+  $("subscribe").innerHTML = `
+    <div class="box"><h4>Feed reader</h4><p>Atom or JSON Feed: confirmed events, escalations and wrap-ups.</p>
+      ${copyRow("atom", sub.atom)}<div style="height:6px"></div>${copyRow("json", sub.json_feed)}</div>
+    ${ntfy}
+    <div class="box"><h4>Live stream</h4><p>Server-sent events with every interval and notification, for dashboards and bots.</p>
+      ${copyRow("sse", sub.sse)}<pre>curl -N ${esc(sub.sse)}</pre></div>
+    <div class="box" style="grid-column: 1 / -1"><h4>Webhook</h4>
+      <p>We POST signed JSON to your HTTPS endpoint. To verify ownership we first send <code>{"type":"verification","challenge":"…"}</code>; respond 200 with the challenge value. Each delivery carries <code>X-NEM-Timestamp</code> and <code>X-NEM-Signature: sha256=HMAC(secret, timestamp + "." + body)</code>.</p>
+      <form id="whform">
+        <input name="url" type="url" placeholder="https://example.org/nem-hook" required>
+        <select name="min_severity"><option value="high">Severity high and above (over $5,000/MWh)</option><option value="extreme">Extreme and above (over $10,000/MWh)</option><option value="cap">Market price cap only</option></select>
+        <select name="regions"><option value="">All regions</option>${Object.keys(NAME).map((r) => `<option value="${r}">${NAME[r]} only</option>`).join("")}</select>
+        <button class="primary" type="submit">Register webhook</button>
+      </form>
+      <div id="whresult" class="result"></div>
+      <pre>// Node.js: verify a delivery
+const crypto = require("crypto");
+const expected = "sha256=" + crypto.createHmac("sha256", SECRET)
+  .update(req.headers["x-nem-timestamp"] + "." + rawBody).digest("hex");
+const ok = crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(req.headers["x-nem-signature"]));</pre></div>`;
+  $("whform").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const f = new FormData(ev.target);
+    const body = { url: f.get("url"), min_severity: f.get("min_severity") };
+    if (f.get("regions")) body.regions = [f.get("regions")];
+    $("whresult").className = "result"; $("whresult").textContent = "Verifying your endpoint…";
+    const r = await fetch("/api/webhooks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const j = await r.json();
+    if (!r.ok) { $("whresult").className = "result err"; $("whresult").textContent = j.error || "Registration failed"; return; }
+    $("whresult").innerHTML = `Registered <code>${esc(j.id)}</code>. Save these now; they are shown once.<pre>secret        ${esc(j.secret)}\nmanage_token  ${esc(j.manage_token)}\n\n# unsubscribe\ncurl -X DELETE -H "Authorization: Bearer ${esc(j.manage_token)}" ${esc(location.origin)}/api/webhooks/${esc(j.id)}</pre>`;
+  };
+}
+
+function logNotification(n) {
+  const log = $("log");
+  const empty = $("log-empty"); if (empty) empty.remove();
+  const d = document.createElement("div");
+  d.innerHTML = `<b>${esc(n.title)}</b> <span class="status">${new Date(n.created_at).toLocaleTimeString("en-AU")}</span><br><span class="status">${esc(n.summary)}</span>`;
+  log.prepend(d);
+}
+
+async function loadRecentNotifications() {
+  const { notifications } = await (await fetch("/api/notifications?limit=5")).json();
+  notifications.reverse().forEach(logNotification);
+}
+
+function connect() {
+  const es = new EventSource("/api/stream");
+  let pending = null;
+  es.addEventListener("interval", () => { clearTimeout(pending); pending = setTimeout(loadStatus, 500); });
+  es.addEventListener("notification", (m) => { logNotification(JSON.parse(m.data)); loadEvents(); });
+  es.onerror = () => { es.close(); setTimeout(connect, 10000); };
+}
+
+(async () => {
+  await Promise.all([loadStatus(), loadEvents(), loadRecentNotifications()]);
+  const id = new URLSearchParams(location.search).get("event");
+  if (id) openEvent(id, false);
+  connect();
+  setInterval(loadStatus, 60000);
+  window.onpopstate = () => { const i = new URLSearchParams(location.search).get("event"); if (i) openEvent(i, false); };
+})();
+</script>
+</body>
+</html>
