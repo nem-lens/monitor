@@ -178,24 +178,32 @@ pub fn headline_prices(
     Ok((round2(base_mean), scenarios))
 }
 
-/// The intervals of a nemcf snapshots file that end within the span, as a
-/// compact JSON array. Every span interval must be present.
+/// The intervals of a nemcf snapshots file that end within the span, in the
+/// file's own form: a plain array of intervals, or packed
+/// (`{schema, constraints, intervals}`, whose shared equations are kept
+/// whole so the intervals' indexes stay valid). Every span interval must be
+/// present.
 pub fn trim_snapshots(json: &[u8], start: NaiveDateTime, end: NaiveDateTime) -> Result<Vec<u8>> {
-    let all: Vec<serde_json::Value> = serde_json::from_slice(json).context("snapshots.json")?;
+    let mut doc: serde_json::Value = serde_json::from_slice(json).context("snapshots.json")?;
+    let all = match &mut doc {
+        serde_json::Value::Array(a) => a,
+        serde_json::Value::Object(o) => match o.get_mut("intervals") {
+            Some(serde_json::Value::Array(a)) => a,
+            _ => bail!("packed snapshots have no intervals array"),
+        },
+        _ => bail!("snapshots.json is neither an array nor packed"),
+    };
     let mut seen = BTreeSet::new();
-    let kept: Vec<&serde_json::Value> = all
-        .iter()
-        .filter(|iv| {
-            let t = iv
-                .get("settlement")
-                .and_then(|s| s.as_str())
-                .and_then(parse_market);
-            match t {
-                Some(t) if start <= t && t <= end => seen.insert(t),
-                _ => false,
-            }
-        })
-        .collect();
+    all.retain(|iv| {
+        let t = iv
+            .get("settlement")
+            .and_then(|s| s.as_str())
+            .and_then(parse_market);
+        match t {
+            Some(t) if start <= t && t <= end => seen.insert(t),
+            _ => false,
+        }
+    });
     let n = intervals(start, end);
     if seen.len() != n {
         bail!(
@@ -205,7 +213,7 @@ pub fn trim_snapshots(json: &[u8], start: NaiveDateTime, end: NaiveDateTime) -> 
             iso_market(end)
         );
     }
-    Ok(serde_json::to_vec(&kept)?)
+    Ok(serde_json::to_vec(&doc)?)
 }
 
 fn gzip(data: &[u8]) -> Result<Vec<u8>> {
@@ -406,6 +414,19 @@ mod tests {
         assert_eq!(v.len(), 2);
         assert_eq!(v[0]["x"], 2);
         assert!(trim_snapshots(json, t("2026-10-12T14:20:00"), t("2026-10-12T14:30:00")).is_err());
+    }
+
+    #[test]
+    fn packed_snapshots_keep_their_shared_equations() {
+        let json = br#"{"schema":1,"constraints":[{"id":"C1"}],"intervals":[
+            {"settlement":"2026-10-12T14:15:00+10:00","constraint_rhs":[[0,1.0]]},
+            {"settlement":"2026-10-12T14:20:00+10:00","constraint_rhs":[[0,2.0]]}]}"#;
+        let out = trim_snapshots(json, t("2026-10-12T14:20:00"), t("2026-10-12T14:20:00")).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["schema"], 1);
+        assert_eq!(v["constraints"][0]["id"], "C1");
+        assert_eq!(v["intervals"].as_array().unwrap().len(), 1);
+        assert_eq!(v["intervals"][0]["constraint_rhs"][0][1], 2.0);
     }
 
     #[test]

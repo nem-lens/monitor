@@ -335,7 +335,8 @@ mod tests {
     #[test]
     fn example_config_parses_and_validates() {
         let cfg = parse(include_str!("../deploy/config.example.toml")).unwrap();
-        assert_eq!(cfg.triggers.len(), 2);
+        assert_eq!(cfg.triggers.len(), 1);
+        assert_eq!(cfg.triggers[0].on, ["data_ready"]);
         assert_eq!(cfg.server.bind, "127.0.0.1:8080");
     }
 

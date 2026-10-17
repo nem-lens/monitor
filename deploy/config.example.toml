@@ -59,19 +59,12 @@ api_requests_per_ip_per_minute = 120   # API and feeds, per client IP; 0 disable
 # Operator triggers run the rest of the pipeline. Commands run without a shell;
 # the notification JSON arrives on stdin and as NEM_* environment variables.
 
-# Live replay as soon as an event closes (outcomes-only data tier).
+# Replay with every scenario and publish to the event library once bids are
+# public (~04:15 next day); see deploy/publish-event.sh.
 [[triggers]]
-name = "replay-live"
-on = ["closed"]
-min_severity = "high"
-command = ["/opt/nemcf/bin/nemcf", "replay", "--event", "{event_id}", "--tier", "{data_tier}"]
-timeout_secs = 1800
-
-# Full replay, counterfactuals and media brief once bids are public (~04:15 next day).
-[[triggers]]
-name = "full-brief"
+name = "publish"
 on = ["data_ready"]
-command = ["/opt/nemcf/bin/nemcf", "replay", "--bundle", "{bundle}", "--scenario", "/opt/nemcf/scenarios", "--out", "{bundle}/replay"]
+command = ["/opt/nem-lens/publish-event.sh", "{bundle}"]
 timeout_secs = 3600
 
 # Or hand off to a job queue instead of running locally.
