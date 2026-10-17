@@ -22,7 +22,6 @@ use arrow_array::{
     Array, ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray, TimestampMillisecondArray,
 };
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
-use chrono::Datelike;
 use chrono::{Duration, NaiveDate, NaiveDateTime, Utc};
 use nem_lens_aemo::bids::period_of;
 use nem_lens_aemo::files::{visit_csvs, MAX_MEMBER_BYTES};
@@ -139,6 +138,13 @@ pub struct StaticData {
     pub months: Vec<String>,
     pub invoked_versions: usize,
     pub equations_found: usize,
+    /// Versions of invoked constraints other than those invoked, sliced for
+    /// nemcf's fallback when an invoked version is not archived.
+    #[serde(default)]
+    pub other_versions: usize,
+    /// Invoked constraints with no version at all in the months searched.
+    #[serde(default)]
+    pub ids_without_any_version: Vec<String>,
     /// Invoked versions with no GENCONDATA row in the months searched.
     pub missing_equations: Vec<ConstraintVersion>,
     pub dudetail_month: Option<String>,
@@ -552,6 +558,27 @@ fn month_dir(t: NaiveDateTime) -> String {
     t.format("%Y_%m").to_string()
 }
 
+/// The `YYYY_MM` folders under an MMSDM root, sorted.
+fn month_dirs(mmsdm: &Path) -> Vec<String> {
+    let mut v: Vec<String> = fs::read_dir(mmsdm)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| e.path().is_dir())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .filter(|n| {
+                    n.len() == 7
+                        && n.as_bytes()[4] == b'_'
+                        && n.bytes()
+                            .enumerate()
+                            .all(|(i, b)| i == 4 || b.is_ascii_digit())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort();
+    v
+}
+
 /// CSV or zip files in `<mmsdm>/<month>/<folder>/`, sorted.
 fn mmsdm_files(mmsdm: &Path, month: &str, folder: &str) -> Vec<PathBuf> {
     let Ok(rd) = fs::read_dir(mmsdm.join(month).join(folder)) else {
@@ -591,82 +618,87 @@ fn read_mmsdm(path: &Path, mut keep: impl FnMut(&Record) -> bool) -> Result<(Vec
     Ok((bytes, tables))
 }
 
-fn version_of(r: &Record) -> Option<ConstraintVersion> {
-    Some(ConstraintVersion {
-        constraint_id: r.text("GENCONID")?.to_string(),
-        effective_date: iso_market(parse_market(r.text("EFFECTIVEDATE")?)?),
-        version_no: r.text("VERSIONNO")?.parse().ok()?,
-    })
-}
-
-/// Add the MMSDM equations for every constraint version the event invoked,
-/// and the unit registration details in force at the window start, from a
-/// local MMSDM tree laid out as `<mmsdm>/<YYYY_MM>/<TABLE>/*.CSV`.
+/// Add the MMSDM equations for the constraints the event invoked, and the
+/// unit registration details in force at the window start, from a local
+/// MMSDM tree laid out as `<mmsdm>/<YYYY_MM>/<TABLE>/*.CSV`.
 ///
-/// A version appears in the archive month of its EFFECTIVEDATE; versions
-/// effective on the 1st also appear in the previous month, so both are
-/// searched and rows are deduplicated.
+/// Every version of each invoked GENCONID is sliced, from every month up to
+/// the window's, not only the exact versions invoked: when an invoked
+/// version is not archived yet (the current month's archive appears early
+/// the next month), nemcf falls back to another version that reproduces
+/// AEMO's published LHS. Rows repeated across months are deduplicated.
+/// Pre-2016 tables are keyed with an empty sub-table (`GENCONDATA_`) and are
+/// read as the `_NULL` tables.
 pub fn add_static(dir: &Path, mmsdm: &Path) -> Result<Manifest> {
     let mut m = Manifest::load(dir)?;
     let window_start = parse_market(&m.window_start).context("manifest window_start")?;
+    let window_end = parse_market(&m.window_end).context("manifest window_end")?;
     let invoked = invoked_versions(dir)?;
-    let mut months = BTreeSet::new();
-    for v in &invoked {
-        let t = parse_market(&v.effective_date).context("effective date")?;
-        months.insert(month_dir(t));
-        if t.day() == 1 {
-            months.insert(month_dir(t - Duration::days(1)));
-        }
-    }
+    let ids: BTreeSet<&str> = invoked.iter().map(|v| v.constraint_id.as_str()).collect();
+    let last = month_dir(window_end);
+    let months: Vec<String> = month_dirs(mmsdm)
+        .into_iter()
+        .filter(|mo| *mo <= last)
+        .collect();
 
     let mut bufs: HashMap<&str, TableBuf> = HashMap::new();
     let mut seen_rows: BTreeSet<String> = BTreeSet::new();
     let mut found: BTreeSet<ConstraintVersion> = BTreeSet::new();
+    let mut sliced: BTreeSet<ConstraintVersion> = BTreeSet::new();
     for month in &months {
         for (key, folder, _) in STATIC_TABLES {
             for path in mmsdm_files(mmsdm, month, folder) {
                 let (bytes, tables) = read_mmsdm(&path, |r| {
-                    version_of(r).is_some_and(|v| invoked.contains(&v))
+                    r.text("GENCONID").is_some_and(|c| ids.contains(c.trim()))
                 })?;
-                let Some(t) = tables.get(key) else { continue };
-                // Dedupe rows repeated across months on the version key plus
-                // the term's identity (connection point, interconnector or
-                // region, and service).
-                let mut kept = Table {
-                    columns: t.columns.clone(),
-                    rows: Vec::new(),
-                };
-                for row in &t.rows {
-                    let part = |c: &str| t.col(row, c).unwrap_or("").trim().to_string();
-                    let id = format!(
-                        "{key}|{}|{}|{}|{}{}{}|{}",
-                        part("GENCONID"),
-                        part("EFFECTIVEDATE"),
-                        part("VERSIONNO"),
-                        part("CONNECTIONPOINTID"),
-                        part("INTERCONNECTORID"),
-                        part("REGIONID"),
-                        part("BIDTYPE")
-                    );
-                    if seen_rows.insert(id) {
-                        if key == "GENCONDATA_NULL" {
-                            if let (Some(c), Some(e), Some(v)) = (
-                                t.col(row, "GENCONID"),
-                                t.col(row, "EFFECTIVEDATE").and_then(parse_market),
-                                t.col(row, "VERSIONNO").and_then(|v| v.trim().parse().ok()),
-                            ) {
-                                found.insert(ConstraintVersion {
-                                    constraint_id: c.trim().to_string(),
-                                    effective_date: iso_market(e),
-                                    version_no: v,
-                                });
+                let old_key = key.trim_end_matches("NULL");
+                let mut contributed = false;
+                for t in [tables.get(key), tables.get(old_key)].into_iter().flatten() {
+                    // Dedupe rows repeated across months on the version key
+                    // plus the term's identity (connection point,
+                    // interconnector or region, and service).
+                    let mut kept = Table {
+                        columns: t.columns.clone(),
+                        rows: Vec::new(),
+                    };
+                    for row in &t.rows {
+                        let part = |c: &str| t.col(row, c).unwrap_or("").trim().to_string();
+                        let version = || -> Option<ConstraintVersion> {
+                            Some(ConstraintVersion {
+                                constraint_id: part("GENCONID"),
+                                effective_date: iso_market(parse_market(&part("EFFECTIVEDATE"))?),
+                                version_no: part("VERSIONNO").parse().ok()?,
+                            })
+                        };
+                        let Some(v) = version() else { continue };
+                        let id = format!(
+                            "{key}|{}|{}|{}|{}{}{}|{}",
+                            v.constraint_id,
+                            v.effective_date,
+                            v.version_no,
+                            part("CONNECTIONPOINTID"),
+                            part("INTERCONNECTORID"),
+                            part("REGIONID"),
+                            part("BIDTYPE")
+                        );
+                        if seen_rows.insert(id) {
+                            if key == "GENCONDATA_NULL" {
+                                if invoked.contains(&v) {
+                                    found.insert(v.clone());
+                                }
+                                sliced.insert(v);
                             }
+                            kept.rows.push(row.clone());
                         }
-                        kept.rows.push(row.clone());
                     }
+                    contributed |= !t.rows.is_empty();
+                    bufs.entry(key).or_default().add(&kept);
                 }
-                bufs.entry(key).or_default().add(&kept);
-                record_source(&mut m, &path, &bytes, month);
+                // Sources are the files holding matching rows, duplicates
+                // included; every month searched is in static_data.months.
+                if contributed {
+                    record_source(&mut m, &path, &bytes, month);
+                }
             }
         }
     }
@@ -676,15 +708,10 @@ pub fn add_static(dir: &Path, mmsdm: &Path) -> Result<Manifest> {
     let units = unit_ids(dir)?;
     let (key, folder, file) = DUDETAIL;
     let mut dudetail_month = None;
-    let mut candidates: Vec<String> = fs::read_dir(mmsdm)
-        .map(|rd| {
-            rd.filter_map(|e| e.ok())
-                .map(|e| e.file_name().to_string_lossy().to_string())
-                .filter(|n| n.len() == 7 && *n <= month_dir(window_start))
-                .collect()
-        })
-        .unwrap_or_default();
-    candidates.sort();
+    let candidates: Vec<String> = month_dirs(mmsdm)
+        .into_iter()
+        .filter(|n| *n <= month_dir(window_start))
+        .collect();
     if let Some(month) = candidates
         .iter()
         .rev()
@@ -729,10 +756,17 @@ pub fn add_static(dir: &Path, mmsdm: &Path) -> Result<Manifest> {
         .filter(|v| !found.contains(v))
         .cloned()
         .collect();
+    let with_any: BTreeSet<&str> = sliced.iter().map(|v| v.constraint_id.as_str()).collect();
     m.static_data = Some(StaticData {
-        months: months.into_iter().collect(),
+        months,
         invoked_versions: invoked.len(),
         equations_found: invoked.len() - missing.len(),
+        other_versions: sliced.len() - found.len(),
+        ids_without_any_version: ids
+            .iter()
+            .filter(|c| !with_any.contains(*c))
+            .map(|c| c.to_string())
+            .collect(),
         missing_equations: missing,
         dudetail_month,
     });
@@ -1041,6 +1075,27 @@ mod tests {
             "I,SPDCPC,NULL,2,CONNECTIONPOINTID,EFFECTIVEDATE,VERSIONNO,GENCONID,FACTOR,BIDTYPE\n\
              D,SPDCPC,NULL,2,NBAY1,\"2026/10/01 00:00:00\",2,A,1,ENERGY\n",
         );
+        // C's invoked version is not archived, but an older version is, in
+        // the pre-2016 form (empty sub-table). D was never invoked.
+        write(
+            "2012_07",
+            "GENCONDATA",
+            "I,GENCONDATA,,5,EFFECTIVEDATE,VERSIONNO,GENCONID,CONSTRAINTTYPE,CONSTRAINTVALUE\n\
+             D,GENCONDATA,,5,\"2012/07/02 00:00:00\",2,C,<=,50\n\
+             D,GENCONDATA,,5,\"2012/07/02 00:00:00\",1,D,<=,10\n",
+        );
+        write(
+            "2012_07",
+            "SPDCONNECTIONPOINTCONSTRAINT",
+            "I,SPDCPC,,2,CONNECTIONPOINTID,EFFECTIVEDATE,VERSIONNO,GENCONID,FACTOR,BIDTYPE\n\
+             D,SPDCPC,,2,NBAY1,\"2012/07/02 00:00:00\",2,C,1,ENERGY\n",
+        );
+        // After the window: not searched.
+        write(
+            "2026_11",
+            "GENCONDATA",
+            &gencon("D,GENCONDATA,NULL,7,\"2026/11/02 00:00:00\",3,A,<=,100\n"),
+        );
         write(
             "2026_09",
             "DUDETAILSUMMARY",
@@ -1051,21 +1106,25 @@ mod tests {
 
         let m = add_static(&dir, &mmsdm).unwrap();
         let s = m.static_data.clone().unwrap();
-        assert_eq!(s.months, ["2025_01", "2026_09", "2026_10"]);
+        assert_eq!(s.months, ["2012_07", "2026_09", "2026_10"]);
         assert_eq!((s.invoked_versions, s.equations_found), (3, 2));
         assert_eq!(s.missing_equations[0].constraint_id, "C");
+        assert_eq!(s.other_versions, 2, "A v1 and C v2");
+        assert!(s.ids_without_any_version.is_empty());
         assert_eq!(s.dudetail_month.as_deref(), Some("2026_09"));
         let rows = |f: &str| m.outputs.iter().find(|o| o.file == f).map(|o| o.rows);
         assert_eq!(
             rows("static_gencondata.parquet"),
-            Some(2),
-            "A v2 once, B; not A v1"
+            Some(4),
+            "A v2 once, A v1, B, C v2; not D or November's A v3"
         );
         assert_eq!(
             rows("static_spdconnectionpointconstraint.parquet"),
-            Some(2),
-            "deduplicated across months"
+            Some(3),
+            "deduplicated across months, plus the pre-2016 C row"
         );
+        assert!(m.sources.iter().any(|s| s.role == "mmsdm:2012_07"));
+        assert!(!m.sources.iter().any(|s| s.role == "mmsdm:2026_11"));
         assert_eq!(
             rows("static_dudetailsummary.parquet"),
             Some(1),

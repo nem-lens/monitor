@@ -276,13 +276,23 @@ async fn main() -> Result<()> {
             let m = bundle::add_static(&dir, &mmsdm)?;
             let s = m.static_data.unwrap_or_default();
             println!(
-                "{}: {} of {} invoked constraint versions have equations (months {}); unit details from {}",
+                "{}: {} of {} invoked constraint versions have equations, plus {} other versions of them for fallback ({} months, {} to {}); unit details from {}",
                 m.event_id,
                 s.equations_found,
                 s.invoked_versions,
-                s.months.join(", "),
+                s.other_versions,
+                s.months.len(),
+                s.months.first().map_or("-", String::as_str),
+                s.months.last().map_or("-", String::as_str),
                 s.dudetail_month.as_deref().unwrap_or("none")
             );
+            if !s.ids_without_any_version.is_empty() {
+                println!(
+                    "  {} constraints have no version at all: {}",
+                    s.ids_without_any_version.len(),
+                    s.ids_without_any_version.join(", ")
+                );
+            }
             for v in s.missing_equations.iter().take(10) {
                 println!(
                     "  missing: {} {} v{}",
