@@ -26,6 +26,10 @@ struct Draft {
     /// Prices since the event opened, including the quiet tail.
     prices: Vec<(NaiveDateTime, f64)>,
     quiet: u32,
+    /// Every binding constraint seen while active; the event shows the top 10.
+    /// Ranking only a truncated list dropped constraints that later caught up.
+    #[serde(default)]
+    constraints: Vec<ConstraintAgg>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -212,6 +216,7 @@ impl Detector {
                     event: ev,
                     prices: Vec::new(),
                     quiet: 0,
+                    constraints: Vec::new(),
                 }
             }
             None => return out,
@@ -246,7 +251,7 @@ impl Detector {
             if let Some(d) = ri.demand {
                 ev.demand_peak = Some(ev.demand_peak.map_or(d, |x| x.max(d)));
             }
-            aggregate_network(ev, snap);
+            aggregate_network(&mut draft.constraints, ev, snap);
         } else {
             draft.quiet += 1;
         }
@@ -429,20 +434,24 @@ fn demand_ramp(series: &VecDeque<Point>, window: usize) -> Option<f64> {
     Some(last - min)
 }
 
-fn aggregate_network(ev: &mut Event, snap: &DispatchSnapshot) {
+fn aggregate_network(all: &mut Vec<ConstraintAgg>, ev: &mut Event, snap: &DispatchSnapshot) {
+    if all.is_empty() {
+        // State saved before the full list existed: continue from the event's.
+        all.clone_from(&ev.constraints);
+    }
     for c in &snap.constraints {
         let binding = c.marginal.abs() > 1e-6;
         let violated = c.violation > 1e-6;
         if !binding && !violated {
             continue;
         }
-        match ev.constraints.iter_mut().find(|a| a.id == c.id) {
+        match all.iter_mut().find(|a| a.id == c.id) {
             Some(a) => {
                 a.binding_intervals += binding as u32;
                 a.violated_intervals += violated as u32;
                 a.max_abs_marginal = a.max_abs_marginal.max(c.marginal.abs());
             }
-            None => ev.constraints.push(ConstraintAgg {
+            None => all.push(ConstraintAgg {
                 id: c.id.clone(),
                 binding_intervals: binding as u32,
                 max_abs_marginal: c.marginal.abs(),
@@ -450,14 +459,14 @@ fn aggregate_network(ev: &mut Event, snap: &DispatchSnapshot) {
             }),
         }
     }
-    ev.constraints.sort_by(|a, b| {
+    all.sort_by(|a, b| {
         b.binding_intervals.cmp(&a.binding_intervals).then(
             b.max_abs_marginal
                 .partial_cmp(&a.max_abs_marginal)
                 .unwrap_or(std::cmp::Ordering::Equal),
         )
     });
-    ev.constraints.truncate(10);
+    ev.constraints = all.iter().take(10).cloned().collect();
 
     for ic in &snap.interconnectors {
         let at_export = ic.export_limit.is_some_and(|l| ic.flow >= l - 1.0);

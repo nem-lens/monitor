@@ -3,10 +3,12 @@
 //!   nem-monitor -c config.toml serve            poll NEMWeb, detect, publish, serve the site
 //!   nem-monitor -c config.toml serve --offline  serve an existing database without polling
 //!   nem-monitor -c config.toml replay DIR       run the detector over saved DispatchIS files
-//!   nem-monitor -c config.toml mark-data-ready DAY   simulate next-day data for testing
+//!   nem-monitor -c config.toml mark-data-ready DAY [--files DIR]   record next-day data
+//!   nem-monitor -c config.toml prune           trim the rolling buffer
 //!   nem-monitor -c config.toml check-config
 
 mod app;
+mod bundle;
 mod config;
 mod detect;
 mod feeds;
@@ -68,7 +70,14 @@ enum Cmd {
         day: String,
         #[arg(long)]
         triggers: bool,
+        /// Directory holding the real next-day zips (e.g. from the NEMWeb
+        /// Archive); they are sliced into event bundles. Without it the data
+        /// is recorded as available but bundles get no bids.
+        #[arg(long, value_name = "DIR")]
+        files: Option<PathBuf>,
     },
+    /// Drop buffered outcomes and raw zips older than store.buffer_hours.
+    Prune,
     /// Validate the configuration and exit.
     CheckConfig,
 }
@@ -115,7 +124,11 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::MarkDataReady { day, triggers } => {
+        Cmd::MarkDataReady {
+            day,
+            triggers,
+            files,
+        } => {
             chrono::NaiveDate::parse_from_str(&day, "%Y-%m-%d")?;
             let conn = store::open(&cfg.store.path)?;
             let mut app = app::App::new(cfg, conn, "replay")?;
@@ -123,12 +136,22 @@ async fn main() -> Result<()> {
             app.fire_triggers = triggers;
             app.echo = true;
             let sources = app.cfg.source.data_ready_dirs.clone();
+            let found = match &files {
+                Some(dir) => local_daily_files(dir, &sources)?,
+                None => Vec::new(),
+            };
             app.with_db(|c| {
+                for (source, d, path) in &found {
+                    store::set_data_ready_file(c, source, d, path)?;
+                }
                 for s in &sources {
                     store::record_data_ready(c, s, &day, "manual")?;
                 }
                 Ok(())
             })?;
+            for (source, d, path) in &found {
+                println!("{source} {d}: {path}");
+            }
             ingest::promote_ready_events(&app).await?;
             if triggers {
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -137,6 +160,16 @@ async fn main() -> Result<()> {
                     .acquire_many(app.cfg.max_concurrent_triggers.unwrap_or(2).max(1) as u32)
                     .await;
             }
+            Ok(())
+        }
+        Cmd::Prune => {
+            let conn = store::open(&cfg.store.path)?;
+            let app = app::App::new(cfg, conn, "offline")?;
+            let n = ingest::prune_buffer(&app)?;
+            println!(
+                "pruned to the last {} hours; removed {n} raw files",
+                app.cfg.store.buffer_hours
+            );
             Ok(())
         }
         Cmd::Serve {
@@ -185,4 +218,35 @@ async fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Next-day zips in `dir` for the configured sources, as (source, trading
+/// day, absolute path). A source's files are named PUBLIC_<SOURCE>_<YYYYMMDD>_….
+fn local_daily_files(
+    dir: &std::path::Path,
+    sources: &[String],
+) -> Result<Vec<(String, String, String)>> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let path = std::fs::canonicalize(entry?.path())?;
+        let name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        for (file, day) in nemweb::daily_files(&name) {
+            for s in sources {
+                let prefix = format!("PUBLIC_{}_", s.to_ascii_uppercase());
+                // The date must follow the prefix directly, so NEXT_DAY_OFFER_ENERGY
+                // does not claim NEXT_DAY_OFFER_ENERGY_SPARSE files.
+                let dated = file
+                    .strip_prefix(&prefix)
+                    .is_some_and(|rest| rest.starts_with(&day.format("%Y%m%d").to_string()));
+                if dated {
+                    out.push((s.clone(), day.to_string(), path.to_string_lossy().into()));
+                }
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
 }

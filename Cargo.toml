@@ -8,6 +8,8 @@ repository = "https://github.com/nem-lens/monitor"
 
 [dependencies]
 anyhow = "1"
+arrow-array = "60.0.0"
+arrow-schema = "60.0.0"
 axum = { version = "0.8", features = ["macros"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
@@ -17,6 +19,7 @@ hmac = "0.12"
 # Shared NEMWeb parsers. The path matches the NEM Lens checkout layout
 # (monitor/ and aemo/ side by side); CI checks both repos out the same way.
 nem-lens-aemo = { path = "../aemo" }
+parquet = { version = "60.0.0", default-features = false, features = ["arrow", "snap"] }
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 rusqlite = { version = "0.32", features = ["bundled"] }

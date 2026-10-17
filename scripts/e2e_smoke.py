@@ -88,6 +88,8 @@ bind = "127.0.0.1:{PORT}"
 public_url = "{BASE}"
 [store]
 path = {json.dumps(str(work / "e2e.db"))}
+raw_dir = {json.dumps(str(work / "raw"))}
+bundle_dir = {json.dumps(str(work / "bundles"))}
 [public]
 allow_http_webhooks = true
 api_requests_per_ip_per_minute = 0   # this script polls faster than the default limit
@@ -108,6 +110,7 @@ timeout_secs = 3
                            env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
         run_checks(log)
+        check_bundle(work, fixture)
     finally:
         srv.terminate()
         recv.terminate()
@@ -190,6 +193,23 @@ def run_checks(log):
     check("test delivery with token 200", http(f"/api/webhooks/{hid}/test", {"Authorization": f"Bearer {tok}"}, "POST")[0] == 200)
     check("delete without token 401", http(f"/api/webhooks/{hid}", method="DELETE")[0] == 401)
     check("delete with token 204", http(f"/api/webhooks/{hid}", {"Authorization": f"Bearer {tok}"}, "DELETE")[0] == 204)
+
+
+def check_bundle(work, fixture):
+    ev = json.loads(http("/api/events")[2])["events"][0]
+    d = json.loads(http(f"/api/events/{ev['id']}")[2])
+    check("event detail is served from the bundle", d.get("series_source") == "bundle" and d["bundle"]["status"] == "written", d.get("bundle"))
+    bdir = work / "bundles" / ev["id"]
+    m = json.loads((bdir / "manifest.json").read_text()) if (bdir / "manifest.json").exists() else {}
+    files = sorted(o["file"] for o in m.get("outputs", []))
+    check("bundle has the four DispatchIS tables",
+          files == ["dispatch_constraint.parquet", "dispatch_interconnectorres.parquet", "dispatch_price.parquet", "dispatch_regionsum.parquet"], files)
+    check("bundle window covers every interval", m.get("intervals_found") == m.get("intervals_expected") and m.get("intervals_found", 0) > 40, m.get("notes"))
+    out = subprocess.run([sys.executable, "-I", str(REPO / "scripts" / "bundle_check.py"), str(bdir), "--sources", str(fixture),
+                          "--expect-peak", "23107", "--expect-above", "11"], capture_output=True, text=True)
+    check("bundle hashes match and DuckDB reproduces the peak", out.returncode == 0, out.stdout[-600:])
+    if "duckdb not installed" in out.stdout:
+        print("  (duckdb not installed: hash checks only)")
 
 
 if __name__ == "__main__":

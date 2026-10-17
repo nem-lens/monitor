@@ -75,14 +75,22 @@ impl Default for SourceCfg {
 #[serde(default, deny_unknown_fields)]
 pub struct StoreCfg {
     pub path: String,
-    pub retain_days: i64,
+    /// Rolling buffer of dispatch outcomes and raw DispatchIS zips, in hours.
+    /// Older data is dropped; confirmed events keep theirs in bundles.
+    pub buffer_hours: i64,
+    /// Raw DispatchIS zips for the buffer, from which bundles are cut.
+    pub raw_dir: String,
+    /// One directory per confirmed event: Parquet tables and manifest.json.
+    pub bundle_dir: String,
 }
 
 impl Default for StoreCfg {
     fn default() -> Self {
         Self {
             path: "nem-monitor.db".into(),
-            retain_days: 90,
+            buffer_hours: 48,
+            raw_dir: "raw".into(),
+            bundle_dir: "bundles".into(),
         }
     }
 }
@@ -237,6 +245,10 @@ impl Config {
         anyhow::ensure!(
             url::Url::parse(&self.server.public_url).is_ok(),
             "server.public_url must be an absolute URL"
+        );
+        anyhow::ensure!(
+            self.store.buffer_hours >= 6,
+            "store.buffer_hours must be at least 6 (an event window is up to several hours)"
         );
         let d = &self.detect;
         anyhow::ensure!(!d.regions.is_empty(), "detect.regions must not be empty");

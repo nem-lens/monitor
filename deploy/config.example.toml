@@ -18,7 +18,9 @@ data_ready_dirs = ["Next_Day_Dispatch", "Next_Day_Offer_Energy_SPARSE"]
 
 [store]
 path = "/var/lib/nem-monitor/nem-monitor.db"  # NOT the default (nem-monitor.db in the working directory)
-retain_days = 90
+buffer_hours = 48                 # rolling buffer of outcomes and raw zips; events keep theirs in bundles
+raw_dir = "raw"                   # relative to the working directory
+bundle_dir = "bundles"            # bundles/<event_id>/*.parquet + manifest.json
 
 [detect]
 regions = ["NSW1", "QLD1", "VIC1", "SA1", "TAS1"]

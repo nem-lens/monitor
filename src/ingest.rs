@@ -1,21 +1,23 @@
 //! Ingest loop: polls NEMWeb for new DispatchIS files and next-day files,
-//! runs the detector and publishes transitions. Also drives offline replay.
+//! runs the detector and publishes transitions. Also drives offline replay,
+//! the raw buffer and event bundles.
 
 use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{NaiveDateTime, Utc};
 use nem_lens_aemo::{dispatch_snapshot, parse_report};
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::app::{App, StreamMsg};
+use crate::bundle::{self, NextDayFile, RawFile, Window};
 use crate::detect::Detector;
 use crate::model::{DispatchSnapshot, Transition, TransitionKind};
 use crate::nemweb;
 use crate::notify::publish;
 use crate::store;
-use crate::time::{iso_market, now_market};
+use crate::time::{iso_market, now_market, parse_market};
 
 pub struct Engine {
     pub detector: Detector,
@@ -63,8 +65,14 @@ pub async fn process_report(
         })?;
         ts
     };
+    if let Err(e) = queue_bundles(app, &transitions) {
+        tracing::warn!("queueing bundle: {e:#}");
+    }
     for tr in transitions {
         publish(app, tr).await;
+    }
+    if let Err(e) = write_due_bundles(app, snap.settlement) {
+        tracing::warn!("writing bundle: {e:#}");
     }
 
     let interval = iso_market(snap.settlement);
@@ -103,6 +111,7 @@ pub async fn replay_dir(app: &App, dir: &Path, delay: Duration) -> Result<usize>
             .unwrap_or_default();
         let bytes = std::fs::read(&path)?;
         let reports = if name.to_ascii_lowercase().ends_with(".zip") {
+            buffer_raw(app, &name, &bytes)?;
             nemweb::unzip_csvs(&bytes)?
         } else {
             vec![(name.clone(), bytes)]
@@ -116,7 +125,194 @@ pub async fn replay_dir(app: &App, dir: &Path, delay: Duration) -> Result<usize>
         }
         app.with_db(|c| store::mark_seen(c, &name, "replay"))?;
     }
+    // No more data is coming: cut any bundle whose window ran past the end.
+    write_due_bundles(app, NaiveDateTime::MAX)?;
     Ok(n)
+}
+
+/// Keep a DispatchIS zip in the rolling raw buffer that bundles are cut from.
+fn buffer_raw(app: &App, name: &str, bytes: &[u8]) -> Result<()> {
+    if nemweb::dispatch_file_interval(name).is_none() {
+        return Ok(());
+    }
+    let dir = Path::new(&app.cfg.store.raw_dir);
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let path = dir.join(name);
+    if !path.exists() {
+        std::fs::write(&path, bytes).with_context(|| format!("writing {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Queue a bundle for each event that closed (discarded events keep nothing).
+fn queue_bundles(app: &App, ts: &[Transition]) -> Result<()> {
+    for tr in ts.iter().filter(|t| t.kind == TransitionKind::Closed) {
+        let Some(w) = Window::for_event(&tr.event) else {
+            continue;
+        };
+        let row = store::BundleRow {
+            event_id: tr.event.id.clone(),
+            status: "pending".into(),
+            window_start: iso_market(w.start),
+            window_end: iso_market(w.end),
+            path: bundle::dir_for(&app.cfg.store.bundle_dir, &tr.event.id)
+                .to_string_lossy()
+                .into(),
+        };
+        app.with_db(|c| store::queue_bundle(c, &row))?;
+    }
+    Ok(())
+}
+
+fn window_of(b: &store::BundleRow) -> Option<Window> {
+    Some(Window {
+        start: parse_market(&b.window_start)?,
+        end: parse_market(&b.window_end)?,
+    })
+}
+
+/// Write each pending bundle whose window has fully arrived by `latest`.
+fn write_due_bundles(app: &App, latest: NaiveDateTime) -> Result<()> {
+    for b in app.with_db(|c| store::bundles_with_status(c, "pending"))? {
+        let Some(w) = window_of(&b) else { continue };
+        if latest < w.end {
+            continue;
+        }
+        let Some(ev) = app.with_db(|c| store::get_event(c, &b.event_id))? else {
+            continue;
+        };
+        let raw = raw_files_in(app, &w)?;
+        let m = bundle::write_dispatch(Path::new(&b.path), &ev, w, &raw)?;
+        app.with_db(|c| store::set_bundle_status(c, &b.event_id, "written"))?;
+        tracing::info!(
+            event = %b.event_id,
+            intervals = m.intervals_found,
+            expected = m.intervals_expected,
+            "bundle written to {}",
+            b.path
+        );
+    }
+    Ok(())
+}
+
+fn raw_names(app: &App) -> Result<Vec<(NaiveDateTime, String)>> {
+    let dir = Path::new(&app.cfg.store.raw_dir);
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut out: Vec<(NaiveDateTime, String)> = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            Some((nemweb::dispatch_file_interval(&name)?, name))
+        })
+        .collect();
+    out.sort();
+    Ok(out)
+}
+
+fn raw_files_in(app: &App, w: &Window) -> Result<Vec<RawFile>> {
+    let base = format!(
+        "{}/{}",
+        app.cfg.source.base_url.trim_end_matches('/'),
+        app.cfg.source.dispatch_dir
+    );
+    let mut out = Vec::new();
+    for (t, name) in raw_names(app)? {
+        if w.contains(t) {
+            let bytes = std::fs::read(Path::new(&app.cfg.store.raw_dir).join(&name))?;
+            out.push(RawFile {
+                url: format!("{base}/{name}"),
+                name,
+                bytes,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Drop buffered outcomes and raw zips older than `store.buffer_hours`,
+/// keeping raw zips that a pending bundle still needs. Returns files removed.
+pub fn prune_buffer(app: &App) -> Result<usize> {
+    let hours = app.cfg.store.buffer_hours;
+    app.with_db(|c| store::prune(c, hours))?;
+    let cutoff = now_market() - chrono::Duration::hours(hours);
+    let pending: Vec<Window> = app
+        .with_db(|c| store::bundles_with_status(c, "pending"))?
+        .iter()
+        .filter_map(window_of)
+        .collect();
+    let mut removed = 0;
+    for (t, name) in raw_names(app)? {
+        if t < cutoff && !pending.iter().any(|w| w.contains(t)) {
+            std::fs::remove_file(Path::new(&app.cfg.store.raw_dir).join(&name))?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+/// Slice the next-day files for an event's window into its bundle. The full
+/// files are read once and not kept.
+pub async fn add_next_day_to_bundle(app: &App, event_id: &str) -> Result<()> {
+    let Some(b) = app.with_db(|c| store::get_bundle(c, event_id))? else {
+        return Ok(());
+    };
+    if b.status != "written" {
+        return Ok(());
+    }
+    let Some(w) = window_of(&b) else {
+        return Ok(());
+    };
+    let mut files = Vec::new();
+    let mut missing = Vec::new();
+    for (day, _, _) in w.trading_periods() {
+        let day = day.to_string();
+        for source in &app.cfg.source.data_ready_dirs {
+            match app.with_db(|c| store::data_ready_file(c, source, &day))? {
+                Some(name) if name != "manual" => match load_next_day(app, source, &name).await {
+                    Ok(f) => files.push(f),
+                    Err(e) => {
+                        tracing::warn!("next-day file {name}: {e:#}");
+                        missing.push(format!("{source} {day}"));
+                    }
+                },
+                _ => missing.push(format!("{source} {day}")),
+            }
+        }
+    }
+    let m = bundle::add_next_day(Path::new(&b.path), &files, &missing)?;
+    if !files.is_empty() {
+        app.with_db(|c| store::set_bundle_status(c, event_id, "next_day"))?;
+    }
+    tracing::info!(event = %event_id, status = %m.next_day.status, "next-day data for bundle");
+    Ok(())
+}
+
+/// A recorded next-day file: a local path (from `mark-data-ready --files`)
+/// or a name in the NEMWeb directory.
+async fn load_next_day(app: &App, source: &str, name: &str) -> Result<NextDayFile> {
+    let local = Path::new(name);
+    let file = local
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| name.to_string());
+    let url = format!(
+        "{}/{source}/{file}",
+        app.cfg.source.base_url.trim_end_matches('/')
+    );
+    let bytes = if local.is_absolute() && local.exists() {
+        std::fs::read(local)?
+    } else {
+        let client = nemweb::client(&app.cfg.source.user_agent)?;
+        nemweb::fetch_bytes(&client, &url).await?
+    };
+    Ok(NextDayFile {
+        source: source.to_string(),
+        name: file,
+        url,
+        bytes,
+    })
 }
 
 /// The always-on loop.
@@ -174,9 +370,9 @@ pub async fn run(app: App) {
                 }
             }
             _ = housekeeping.tick() => {
-                let days = app.cfg.store.retain_days;
-                if let Err(e) = app.with_db(|c| store::prune(c, days)) {
-                    tracing::warn!("prune failed: {e:#}");
+                match prune_buffer(&app) {
+                    Ok(n) => tracing::debug!(removed = n, "pruned buffer"),
+                    Err(e) => tracing::warn!("prune failed: {e:#}"),
                 }
             }
         }
@@ -225,6 +421,9 @@ async fn poll_dispatch(
         let bytes = nemweb::fetch_bytes(client, &format!("{base}{name}"))
             .await
             .with_context(|| format!("downloading {name}"))?;
+        if let Err(e) = buffer_raw(app, &name, &bytes) {
+            tracing::warn!("buffering {name}: {e:#}");
+        }
         for (member, csv) in nemweb::unzip_csvs(&bytes)? {
             if let Err(e) = process_report(app, engine, &member, &csv).await {
                 tracing::warn!("skipping {member}: {e:#}");
@@ -272,10 +471,13 @@ pub async fn promote_ready_events(app: &App) -> Result<()> {
                 kind: TransitionKind::DataReady {
                     tier: "next_day".into(),
                 },
-                event: ev,
+                event: ev.clone(),
             },
         )
         .await;
+        if let Err(e) = add_next_day_to_bundle(app, &ev.id).await {
+            tracing::warn!(event = %ev.id, "adding next-day data to bundle: {e:#}");
+        }
     }
     Ok(())
 }

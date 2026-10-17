@@ -37,6 +37,9 @@ pub fn open(path: &str) -> Result<Connection> {
             id INTEGER PRIMARY KEY AUTOINCREMENT, trigger_name TEXT NOT NULL, event_id TEXT NOT NULL,
             transition TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, exit_code INTEGER,
             output_tail TEXT);
+        CREATE TABLE IF NOT EXISTS bundles (
+            event_id TEXT PRIMARY KEY, status TEXT NOT NULL, window_start TEXT NOT NULL,
+            window_end TEXT NOT NULL, path TEXT NOT NULL, updated_at TEXT NOT NULL);
         "#,
     )?;
     Ok(conn)
@@ -292,15 +295,102 @@ pub fn latest_complete_day(c: &Connection, sources: &[String]) -> Result<Option<
     )
 }
 
-pub fn prune(c: &Connection, retain_days: i64) -> Result<()> {
-    let cutoff =
-        crate::time::iso_market(crate::time::now_market() - chrono::Duration::days(retain_days));
+/// Drop dispatch outcomes and seen-file records older than the rolling buffer.
+/// Event data lives on in bundles.
+pub fn prune(c: &Connection, buffer_hours: i64) -> Result<()> {
+    let age = chrono::Duration::hours(buffer_hours);
+    // region_intervals holds market time; seen_files holds UTC. Compare like with like.
+    let market_cutoff = crate::time::iso_market(crate::time::now_market() - age);
+    let utc_cutoff = (chrono::Utc::now() - age).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     c.execute(
         "DELETE FROM region_intervals WHERE settlement < ?1",
-        [&cutoff],
+        [&market_cutoff],
     )?;
-    c.execute("DELETE FROM seen_files WHERE processed_at < ?1", [&cutoff])?;
+    c.execute(
+        "DELETE FROM seen_files WHERE processed_at < ?1",
+        [&utc_cutoff],
+    )?;
     Ok(())
+}
+
+// ---- event bundles ----
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct BundleRow {
+    pub event_id: String,
+    /// pending (window still open), written (DispatchIS slice), next_day (bids added).
+    pub status: String,
+    pub window_start: String,
+    pub window_end: String,
+    pub path: String,
+}
+
+/// Queue a bundle for a closed event; an existing row is left alone.
+pub fn queue_bundle(c: &Connection, b: &BundleRow) -> Result<()> {
+    c.execute(
+        "INSERT OR IGNORE INTO bundles (event_id, status, window_start, window_end, path, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![b.event_id, b.status, b.window_start, b.window_end, b.path, now()],
+    )?;
+    Ok(())
+}
+
+pub fn set_bundle_status(c: &Connection, event_id: &str, status: &str) -> Result<()> {
+    c.execute(
+        "UPDATE bundles SET status = ?1, updated_at = ?2 WHERE event_id = ?3",
+        params![status, now(), event_id],
+    )?;
+    Ok(())
+}
+
+fn bundle_rows(c: &Connection, sql: &str, arg: &str) -> Result<Vec<BundleRow>> {
+    let mut st = c.prepare(sql)?;
+    let rows = st.query_map([arg], |r| {
+        Ok(BundleRow {
+            event_id: r.get(0)?,
+            status: r.get(1)?,
+            window_start: r.get(2)?,
+            window_end: r.get(3)?,
+            path: r.get(4)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+pub fn bundles_with_status(c: &Connection, status: &str) -> Result<Vec<BundleRow>> {
+    bundle_rows(
+        c,
+        "SELECT event_id, status, window_start, window_end, path FROM bundles WHERE status = ?1 ORDER BY window_start",
+        status,
+    )
+}
+
+pub fn get_bundle(c: &Connection, event_id: &str) -> Result<Option<BundleRow>> {
+    Ok(bundle_rows(
+        c,
+        "SELECT event_id, status, window_start, window_end, path FROM bundles WHERE event_id = ?1",
+        event_id,
+    )?
+    .pop())
+}
+
+/// Record (or replace) the next-day file for a source and trading day.
+pub fn set_data_ready_file(c: &Connection, source: &str, day: &str, filename: &str) -> Result<()> {
+    c.execute(
+        "INSERT OR REPLACE INTO data_ready (source, trading_day, filename, seen_at) VALUES (?1, ?2, ?3, ?4)",
+        params![source, day, filename, now()],
+    )?;
+    Ok(())
+}
+
+/// Next-day file recorded for a source directory and trading day.
+pub fn data_ready_file(c: &Connection, source: &str, day: &str) -> Result<Option<String>> {
+    Ok(c.query_row(
+        "SELECT filename FROM data_ready WHERE source = ?1 AND trading_day = ?2",
+        params![source, day],
+        |r| r.get(0),
+    )
+    .optional()?)
 }
 
 // ---- webhooks ----
@@ -533,7 +623,13 @@ mod tests {
     fn prune_keeps_recent_intervals_only() {
         let c = db();
         let now = crate::time::now_market();
-        for t in [now - chrono::Duration::days(100), now] {
+        // Inside and outside a 48-hour buffer, including within the 10 h
+        // that a UTC/market-time mix-up would get wrong.
+        for t in [
+            now - chrono::Duration::hours(55),
+            now - chrono::Duration::hours(47),
+            now,
+        ] {
             let mut s = DispatchSnapshot {
                 settlement: t,
                 ..Default::default()
@@ -547,11 +643,20 @@ mod tests {
             );
             save_snapshot(&c, &s).unwrap();
         }
-        prune(&c, 90).unwrap();
+        mark_seen(&c, "recent.zip", "dispatchis").unwrap();
+        c.execute(
+            "INSERT INTO seen_files VALUES ('old.zip', 'dispatchis', ?1)",
+            [(chrono::Utc::now() - chrono::Duration::hours(49))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)],
+        )
+        .unwrap();
+        prune(&c, 48).unwrap();
         let left: i64 = c
             .query_row("SELECT COUNT(*) FROM region_intervals", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(left, 1);
+        assert_eq!(left, 2);
+        assert!(is_seen(&c, "recent.zip").unwrap());
+        assert!(!is_seen(&c, "old.zip").unwrap());
         assert_eq!(
             latest_settlement(&c).unwrap(),
             Some(crate::time::iso_market(now))

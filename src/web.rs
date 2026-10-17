@@ -250,16 +250,34 @@ async fn event_detail(
                 .or_else(|| ev.last_active_time())
                 .unwrap_or_default()
                 + chrono::Duration::hours(1);
-            let series = store::series(
-                c,
-                &ev.region,
-                &crate::time::iso_market(start),
-                &crate::time::iso_market(end),
-            )?;
+            // A written bundle is the record once the event closes (the buffer
+            // is pruned after 48 h); while the event is open, use the buffer.
+            let bundle = store::get_bundle(c, &id)?.filter(|b| b.status != "pending");
+            let from_bundle = bundle.as_ref().and_then(|b| {
+                crate::bundle::read_series(std::path::Path::new(&b.path), &ev.region)
+                    .map_err(|e| tracing::warn!(event = %id, "reading bundle: {e:#}"))
+                    .ok()
+            });
+            let (series, source) = match from_bundle {
+                Some(s) => (s, "bundle"),
+                None => (
+                    store::series(
+                        c,
+                        &ev.region,
+                        &crate::time::iso_market(start),
+                        &crate::time::iso_market(end),
+                    )?,
+                    "buffer",
+                ),
+            };
             let notes = store::notifications_for_event(c, &id, true)?;
-            Ok(Some(
-                serde_json::json!({ "event": ev, "series": series, "notifications": notes }),
-            ))
+            Ok(Some(serde_json::json!({
+                "event": ev,
+                "series": series,
+                "series_source": source,
+                "bundle": bundle.map(|b| serde_json::json!({ "status": b.status, "window_start": b.window_start, "window_end": b.window_end })),
+                "notifications": notes,
+            })))
         })
         .map_err(internal)?;
     out.map(Json)
