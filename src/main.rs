@@ -80,6 +80,11 @@ enum Cmd {
     },
     /// Drop buffered outcomes and raw zips older than store.buffer_hours.
     Prune,
+    /// Event bundle tools.
+    Bundle {
+        #[command(subcommand)]
+        cmd: BundleCmd,
+    },
     /// Static-site mode (GitHub Pages): load state, poll once, write the site, exit.
     Once {
         /// Previous site to continue from: a directory or its public URL.
@@ -95,6 +100,18 @@ enum Cmd {
     },
     /// Validate the configuration and exit.
     CheckConfig,
+}
+
+#[derive(Subcommand)]
+enum BundleCmd {
+    /// Add MMSDM equations for every invoked constraint version, and unit
+    /// details, from a local tree laid out as MMSDM/<YYYY_MM>/<TABLE>/*.CSV.
+    AddStatic {
+        /// The bundle directory, e.g. bundles/202610121420-NSW1-high.
+        dir: PathBuf,
+        #[arg(long, value_name = "DIR")]
+        mmsdm: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -223,6 +240,33 @@ async fn main() -> Result<()> {
             // Let ntfy pushes finish before exiting.
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             std::fs::remove_dir_all(&scratch).ok();
+            Ok(())
+        }
+        Cmd::Bundle {
+            cmd: BundleCmd::AddStatic { dir, mmsdm },
+        } => {
+            let m = bundle::add_static(&dir, &mmsdm)?;
+            let s = m.static_data.unwrap_or_default();
+            println!(
+                "{}: {} of {} invoked constraint versions have equations (months {}); unit details from {}",
+                m.event_id,
+                s.equations_found,
+                s.invoked_versions,
+                s.months.join(", "),
+                s.dudetail_month.as_deref().unwrap_or("none")
+            );
+            for v in s.missing_equations.iter().take(10) {
+                println!(
+                    "  missing: {} {} v{}",
+                    v.constraint_id, v.effective_date, v.version_no
+                );
+            }
+            if s.missing_equations.len() > 10 {
+                println!(
+                    "  … and {} more (see manifest.json)",
+                    s.missing_equations.len() - 10
+                );
+            }
             Ok(())
         }
         Cmd::Prune => {

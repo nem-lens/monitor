@@ -22,10 +22,11 @@ use arrow_array::{
     Array, ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray, TimestampMillisecondArray,
 };
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
+use chrono::Datelike;
 use chrono::{Duration, NaiveDate, NaiveDateTime, Utc};
 use nem_lens_aemo::bids::period_of;
 use nem_lens_aemo::files::{visit_csvs, MAX_MEMBER_BYTES};
-use nem_lens_aemo::report::{parse_report_where, Record, Table};
+use nem_lens_aemo::report::{parse_report_where, Record, Table, Tables};
 use nem_lens_aemo::time::{iso_market, parse_market};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
@@ -124,6 +125,25 @@ pub struct NextDay {
     pub note: String,
 }
 
+/// A generic constraint version: (GENCONID, EFFECTIVEDATE, VERSIONNO).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ConstraintVersion {
+    pub constraint_id: String,
+    pub effective_date: String,
+    pub version_no: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct StaticData {
+    /// MMSDM archive months searched, e.g. "2026_09".
+    pub months: Vec<String>,
+    pub invoked_versions: usize,
+    pub equations_found: usize,
+    /// Invoked versions with no GENCONDATA row in the months searched.
+    pub missing_equations: Vec<ConstraintVersion>,
+    pub dudetail_month: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Manifest {
     pub format: u32,
@@ -140,6 +160,9 @@ pub struct Manifest {
     pub outputs: Vec<Output>,
     pub next_day: NextDay,
     pub notes: String,
+    /// MMSDM equations and unit details, added by `bundle add-static`.
+    #[serde(default)]
+    pub static_data: Option<StaticData>,
 }
 
 impl Manifest {
@@ -314,6 +337,7 @@ fn base_manifest(ev: &Event, w: Window) -> Manifest {
             ..Default::default()
         },
         notes: String::new(),
+        static_data: None,
     }
 }
 
@@ -353,7 +377,11 @@ pub fn write_dispatch(dir: &Path, ev: &Event, w: Window, raw: &[RawFile]) -> Res
         );
     }
     for (key, file) in DISPATCH_TABLES {
-        let buf = bufs.remove(key).unwrap_or_default();
+        // A table with no rows in any file has no columns either; Parquet needs
+        // a schema, so it is left out and its absence is the record.
+        let Some(buf) = bufs.remove(key).filter(|b| !b.columns.is_empty()) else {
+            continue;
+        };
         let sha = buf.write_parquet(&dir.join(file))?;
         m.outputs.push(Output {
             file: file.into(),
@@ -462,6 +490,290 @@ pub fn add_next_day(dir: &Path, files: &[NextDayFile], missing: &[String]) -> Re
     m.updated_at = now_iso();
     m.save(dir)?;
     Ok(m)
+}
+
+/// MMSDM tables added by [`add_static`]: (table key, folder under the month,
+/// output file).
+pub const STATIC_TABLES: [(&str, &str, &str); 4] = [
+    ("GENCONDATA_NULL", "GENCONDATA", "static_gencondata.parquet"),
+    (
+        "SPDCPC_NULL",
+        "SPDCONNECTIONPOINTCONSTRAINT",
+        "static_spdconnectionpointconstraint.parquet",
+    ),
+    (
+        "SPDICC_NULL",
+        "SPDINTERCONNECTORCONSTRAINT",
+        "static_spdinterconnectorconstraint.parquet",
+    ),
+    (
+        "SPDRC_NULL",
+        "SPDREGIONCONSTRAINT",
+        "static_spdregionconstraint.parquet",
+    ),
+];
+const DUDETAIL: (&str, &str, &str) = (
+    "PARTICIPANT_REGISTRATION_DUDETAILSUMMARY",
+    "DUDETAILSUMMARY",
+    "static_dudetailsummary.parquet",
+);
+
+/// Constraint versions invoked in the bundle's dispatch_constraint table.
+fn invoked_versions(dir: &Path) -> Result<BTreeSet<ConstraintVersion>> {
+    let mut out = BTreeSet::new();
+    for b in read_batches(&dir.join("dispatch_constraint.parquet"))? {
+        let (Some(id), Some(eff), Some(ver)) = (
+            column::<StringArray>(&b, "CONSTRAINTID"),
+            column::<TimestampMillisecondArray>(&b, "GENCONID_EFFECTIVEDATE"),
+            column::<Int64Array>(&b, "GENCONID_VERSIONNO"),
+        ) else {
+            anyhow::bail!(
+                "dispatch_constraint.parquet lacks GENCONID_EFFECTIVEDATE or GENCONID_VERSIONNO"
+            );
+        };
+        for i in 0..b.num_rows() {
+            if id.is_null(i) || eff.is_null(i) || ver.is_null(i) {
+                continue;
+            }
+            let Some(t) = chrono::DateTime::from_timestamp_millis(eff.value(i)) else {
+                continue;
+            };
+            out.insert(ConstraintVersion {
+                constraint_id: id.value(i).to_string(),
+                effective_date: iso_market(t.naive_utc()),
+                version_no: ver.value(i),
+            });
+        }
+    }
+    Ok(out)
+}
+
+fn month_dir(t: NaiveDateTime) -> String {
+    t.format("%Y_%m").to_string()
+}
+
+/// CSV or zip files in `<mmsdm>/<month>/<folder>/`, sorted.
+fn mmsdm_files(mmsdm: &Path, month: &str, folder: &str) -> Vec<PathBuf> {
+    let Ok(rd) = fs::read_dir(mmsdm.join(month).join(folder)) else {
+        return Vec::new();
+    };
+    let mut v: Vec<PathBuf> = rd
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            let n = p.to_string_lossy().to_ascii_lowercase();
+            n.ends_with(".csv") || n.ends_with(".zip")
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// Stream the CSV rows of an MMSDM file (plain CSV or zip) through `keep`.
+fn read_mmsdm(path: &Path, mut keep: impl FnMut(&Record) -> bool) -> Result<(Vec<u8>, Tables)> {
+    let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut tables = Tables::new();
+    if path
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .ends_with(".zip")
+    {
+        visit_csvs(&bytes, MAX_MEMBER_BYTES, |_, r: &mut dyn Read| {
+            for (k, t) in parse_report_where(r, &mut keep)? {
+                let e: &mut Table = tables.entry(k).or_default();
+                e.columns = t.columns;
+                e.rows.extend(t.rows);
+            }
+            Ok(())
+        })?;
+    } else {
+        tables = parse_report_where(bytes.as_slice(), &mut keep)?;
+    }
+    Ok((bytes, tables))
+}
+
+fn version_of(r: &Record) -> Option<ConstraintVersion> {
+    Some(ConstraintVersion {
+        constraint_id: r.text("GENCONID")?.to_string(),
+        effective_date: iso_market(parse_market(r.text("EFFECTIVEDATE")?)?),
+        version_no: r.text("VERSIONNO")?.parse().ok()?,
+    })
+}
+
+/// Add the MMSDM equations for every constraint version the event invoked,
+/// and the unit registration details in force at the window start, from a
+/// local MMSDM tree laid out as `<mmsdm>/<YYYY_MM>/<TABLE>/*.CSV`.
+///
+/// A version appears in the archive month of its EFFECTIVEDATE; versions
+/// effective on the 1st also appear in the previous month, so both are
+/// searched and rows are deduplicated.
+pub fn add_static(dir: &Path, mmsdm: &Path) -> Result<Manifest> {
+    let mut m = Manifest::load(dir)?;
+    let window_start = parse_market(&m.window_start).context("manifest window_start")?;
+    let invoked = invoked_versions(dir)?;
+    let mut months = BTreeSet::new();
+    for v in &invoked {
+        let t = parse_market(&v.effective_date).context("effective date")?;
+        months.insert(month_dir(t));
+        if t.day() == 1 {
+            months.insert(month_dir(t - Duration::days(1)));
+        }
+    }
+
+    let mut bufs: HashMap<&str, TableBuf> = HashMap::new();
+    let mut seen_rows: BTreeSet<String> = BTreeSet::new();
+    let mut found: BTreeSet<ConstraintVersion> = BTreeSet::new();
+    for month in &months {
+        for (key, folder, _) in STATIC_TABLES {
+            for path in mmsdm_files(mmsdm, month, folder) {
+                let (bytes, tables) = read_mmsdm(&path, |r| {
+                    version_of(r).is_some_and(|v| invoked.contains(&v))
+                })?;
+                let Some(t) = tables.get(key) else { continue };
+                // Dedupe rows repeated across months on the version key plus
+                // the term's identity (connection point, interconnector or
+                // region, and service).
+                let mut kept = Table {
+                    columns: t.columns.clone(),
+                    rows: Vec::new(),
+                };
+                for row in &t.rows {
+                    let part = |c: &str| t.col(row, c).unwrap_or("").trim().to_string();
+                    let id = format!(
+                        "{key}|{}|{}|{}|{}{}{}|{}",
+                        part("GENCONID"),
+                        part("EFFECTIVEDATE"),
+                        part("VERSIONNO"),
+                        part("CONNECTIONPOINTID"),
+                        part("INTERCONNECTORID"),
+                        part("REGIONID"),
+                        part("BIDTYPE")
+                    );
+                    if seen_rows.insert(id) {
+                        if key == "GENCONDATA_NULL" {
+                            if let (Some(c), Some(e), Some(v)) = (
+                                t.col(row, "GENCONID"),
+                                t.col(row, "EFFECTIVEDATE").and_then(parse_market),
+                                t.col(row, "VERSIONNO").and_then(|v| v.trim().parse().ok()),
+                            ) {
+                                found.insert(ConstraintVersion {
+                                    constraint_id: c.trim().to_string(),
+                                    effective_date: iso_market(e),
+                                    version_no: v,
+                                });
+                            }
+                        }
+                        kept.rows.push(row.clone());
+                    }
+                }
+                bufs.entry(key).or_default().add(&kept);
+                record_source(&mut m, &path, &bytes, month);
+            }
+        }
+    }
+
+    // Unit details: the file is a full history with START_DATE..END_DATE, so
+    // take the newest month at or before the window and keep rows in force.
+    let units = unit_ids(dir)?;
+    let (key, folder, file) = DUDETAIL;
+    let mut dudetail_month = None;
+    let mut candidates: Vec<String> = fs::read_dir(mmsdm)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .filter(|n| n.len() == 7 && *n <= month_dir(window_start))
+                .collect()
+        })
+        .unwrap_or_default();
+    candidates.sort();
+    if let Some(month) = candidates
+        .iter()
+        .rev()
+        .find(|mo| !mmsdm_files(mmsdm, mo, folder).is_empty())
+    {
+        for path in mmsdm_files(mmsdm, month, folder) {
+            let (bytes, tables) = read_mmsdm(&path, |r| {
+                let in_force = r
+                    .text("START_DATE")
+                    .and_then(parse_market)
+                    .is_some_and(|s| s <= window_start)
+                    && r.text("END_DATE")
+                        .and_then(parse_market)
+                        .is_none_or(|e| e > window_start);
+                let wanted = units
+                    .as_ref()
+                    .is_none_or(|u| r.text("DUID").is_some_and(|d| u.contains(d)));
+                in_force && wanted
+            })?;
+            if let Some(t) = tables.get(key) {
+                bufs.entry(key).or_default().add(t);
+            }
+            record_source(&mut m, &path, &bytes, month);
+        }
+        dudetail_month = Some(month.clone());
+    }
+
+    for (key, _, file) in STATIC_TABLES.iter().copied().chain([(key, folder, file)]) {
+        if let Some(buf) = bufs.remove(key) {
+            let sha = buf.write_parquet(&dir.join(file))?;
+            m.outputs.retain(|o| o.file != file);
+            m.outputs.push(Output {
+                file: file.into(),
+                table: key.into(),
+                rows: buf.len(),
+                sha256: sha,
+            });
+        }
+    }
+    let missing: Vec<ConstraintVersion> = invoked
+        .iter()
+        .filter(|v| !found.contains(v))
+        .cloned()
+        .collect();
+    m.static_data = Some(StaticData {
+        months: months.into_iter().collect(),
+        invoked_versions: invoked.len(),
+        equations_found: invoked.len() - missing.len(),
+        missing_equations: missing,
+        dudetail_month,
+    });
+    m.updated_at = now_iso();
+    m.save(dir)?;
+    Ok(m)
+}
+
+fn record_source(m: &mut Manifest, path: &Path, bytes: &[u8], month: &str) {
+    let file = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    m.sources.retain(|s| s.file != file);
+    m.sources.push(Source {
+        file,
+        // MMSDM files come from the monthly archive; the local copy is what was hashed.
+        url: String::new(),
+        sha256: sha256_hex(bytes),
+        bytes: bytes.len() as u64,
+        role: format!("mmsdm:{month}"),
+    });
+}
+
+/// DUIDs in unit_dispatch.parquet, if the bundle has next-day data.
+fn unit_ids(dir: &Path) -> Result<Option<BTreeSet<String>>> {
+    let path = dir.join("unit_dispatch.parquet");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let mut out = BTreeSet::new();
+    for b in read_batches(&path)? {
+        if let Some(d) = column::<StringArray>(&b, "DUID") {
+            for i in 0..b.num_rows() {
+                if !d.is_null(i) {
+                    out.insert(d.value(i).to_string());
+                }
+            }
+        }
+    }
+    Ok(Some(out))
 }
 
 pub fn dir_for(bundle_root: &str, event_id: &str) -> PathBuf {
@@ -629,6 +941,139 @@ mod tests {
         assert_eq!(b.num_rows(), 3);
         let n = column::<Int64Array>(&b, "RUNNO").unwrap();
         assert!(n.is_null(1) && n.is_null(2) && n.value(0) == 1);
+    }
+
+    fn test_event() -> Event {
+        serde_json::from_value(serde_json::json!({
+            "id": "e1", "region": "NSW1", "kind": "high_price", "status": "closed",
+            "severity": "cap", "trading_day": "2026-10-12", "start": "2026-10-12T14:20:00+10:00",
+            "last_active": "2026-10-12T15:35:00+10:00", "end": "2026-10-12T15:35:00+10:00",
+            "peak_price": 23107.0, "peak_interval": "2026-10-12T14:20:00+10:00", "intervals_active": 11,
+            "intervals_above_high": 11, "intervals_above_extreme": 5, "mean_price": 8966.0, "min_price": 67.0,
+            "flags": [], "constraints": [], "interconnectors_at_limit": [], "demand_start": null,
+            "demand_peak": null, "data_tier": "live", "updated_at": "x"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn empty_raw_buffer_writes_a_manifest_without_tables() {
+        let dir = std::env::temp_dir().join(format!("nem-bundle-empty-{}", std::process::id()));
+        let ev = test_event();
+        let m = write_dispatch(&dir, &ev, Window::for_event(&ev).unwrap(), &[]).unwrap();
+        assert!(m.outputs.is_empty());
+        assert_eq!(m.intervals_found, 0);
+        assert!(m.notes.contains("0 of 52"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn add_static_matches_versions_by_archive_month() {
+        let root = std::env::temp_dir().join(format!("nem-bundle-static-{}", std::process::id()));
+        let dir = root.join("bundle");
+        fs::create_dir_all(&dir).unwrap();
+        let ev = test_event();
+        base_manifest(&ev, Window::for_event(&ev).unwrap())
+            .save(&dir)
+            .unwrap();
+        // Invoked: A (effective 1 Oct, so in the September archive too), B (in
+        // September), C (no archive month available).
+        let mut dc = TableBuf::default();
+        dc.add(&Table {
+            columns: [
+                "SETTLEMENTDATE",
+                "CONSTRAINTID",
+                "GENCONID_EFFECTIVEDATE",
+                "GENCONID_VERSIONNO",
+            ]
+            .map(String::from)
+            .to_vec(),
+            rows: [
+                ["2026/10/12 14:20:00", "A", "2026/10/01 00:00:00", "2"],
+                ["2026/10/12 14:25:00", "A", "2026/10/01 00:00:00", "2"],
+                ["2026/10/12 14:20:00", "B", "2026/09/15 00:00:00", "1"],
+                ["2026/10/12 14:20:00", "C", "2025/01/10 00:00:00", "3"],
+            ]
+            .map(|r| r.map(String::from).to_vec())
+            .to_vec(),
+        });
+        dc.write_parquet(&dir.join("dispatch_constraint.parquet"))
+            .unwrap();
+
+        let mmsdm = root.join("mmsdm");
+        let write = |month: &str, folder: &str, body: &str| {
+            let d = mmsdm.join(month).join(folder);
+            fs::create_dir_all(&d).unwrap();
+            fs::write(
+                d.join(format!("PUBLIC_ARCHIVE#{folder}#FILE01#{month}.CSV")),
+                body,
+            )
+            .unwrap();
+        };
+        let gencon = |rows: &str| {
+            format!("I,GENCONDATA,NULL,7,EFFECTIVEDATE,VERSIONNO,GENCONID,CONSTRAINTTYPE,CONSTRAINTVALUE\n{rows}")
+        };
+        // A appears in both September and October; A v1 is not the invoked version.
+        write(
+            "2026_09",
+            "GENCONDATA",
+            &gencon(
+                "D,GENCONDATA,NULL,7,\"2026/10/01 00:00:00\",2,A,<=,100\n\
+             D,GENCONDATA,NULL,7,\"2026/10/01 00:00:00\",1,A,<=,90\n\
+             D,GENCONDATA,NULL,7,\"2026/09/15 00:00:00\",1,B,>=,5\n",
+            ),
+        );
+        write(
+            "2026_10",
+            "GENCONDATA",
+            &gencon("D,GENCONDATA,NULL,7,\"2026/10/01 00:00:00\",2,A,<=,100\n"),
+        );
+        write(
+            "2026_09",
+            "SPDCONNECTIONPOINTCONSTRAINT",
+            "I,SPDCPC,NULL,2,CONNECTIONPOINTID,EFFECTIVEDATE,VERSIONNO,GENCONID,FACTOR,BIDTYPE\n\
+             D,SPDCPC,NULL,2,NBAY1,\"2026/10/01 00:00:00\",2,A,1,ENERGY\n\
+             D,SPDCPC,NULL,2,NBAY2,\"2026/10/01 00:00:00\",2,A,0.5,ENERGY\n",
+        );
+        write(
+            "2026_10",
+            "SPDCONNECTIONPOINTCONSTRAINT",
+            "I,SPDCPC,NULL,2,CONNECTIONPOINTID,EFFECTIVEDATE,VERSIONNO,GENCONID,FACTOR,BIDTYPE\n\
+             D,SPDCPC,NULL,2,NBAY1,\"2026/10/01 00:00:00\",2,A,1,ENERGY\n",
+        );
+        write(
+            "2026_09",
+            "DUDETAILSUMMARY",
+            "I,PARTICIPANT_REGISTRATION,DUDETAILSUMMARY,7,DUID,START_DATE,END_DATE,REGIONID,TRANSMISSIONLOSSFACTOR\n\
+             D,PARTICIPANT_REGISTRATION,DUDETAILSUMMARY,7,BW01,\"2020/01/01 00:00:00\",\"2999/12/31 00:00:00\",NSW1,0.98\n\
+             D,PARTICIPANT_REGISTRATION,DUDETAILSUMMARY,7,BW01,\"2010/01/01 00:00:00\",\"2020/01/01 00:00:00\",NSW1,0.95\n",
+        );
+
+        let m = add_static(&dir, &mmsdm).unwrap();
+        let s = m.static_data.clone().unwrap();
+        assert_eq!(s.months, ["2025_01", "2026_09", "2026_10"]);
+        assert_eq!((s.invoked_versions, s.equations_found), (3, 2));
+        assert_eq!(s.missing_equations[0].constraint_id, "C");
+        assert_eq!(s.dudetail_month.as_deref(), Some("2026_09"));
+        let rows = |f: &str| m.outputs.iter().find(|o| o.file == f).map(|o| o.rows);
+        assert_eq!(
+            rows("static_gencondata.parquet"),
+            Some(2),
+            "A v2 once, B; not A v1"
+        );
+        assert_eq!(
+            rows("static_spdconnectionpointconstraint.parquet"),
+            Some(2),
+            "deduplicated across months"
+        );
+        assert_eq!(
+            rows("static_dudetailsummary.parquet"),
+            Some(1),
+            "registration in force only"
+        );
+        assert!(m.sources.iter().any(|s| s.role == "mmsdm:2026_10"));
+        assert_eq!(Manifest::load(&dir).unwrap(), m);
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
