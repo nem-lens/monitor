@@ -6,9 +6,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use nem_lens_aemo::{dispatch_snapshot, parse_report};
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::aemo;
 use crate::app::{App, StreamMsg};
 use crate::detect::Detector;
 use crate::model::{DispatchSnapshot, Transition, TransitionKind};
@@ -42,9 +42,9 @@ pub async fn process_report(
     name: &str,
     csv: &[u8],
 ) -> Result<()> {
-    let tables = aemo::parse_report(csv).with_context(|| format!("parsing {name}"))?;
+    let tables = parse_report(csv).with_context(|| format!("parsing {name}"))?;
     let snap: DispatchSnapshot =
-        aemo::dispatch_snapshot(&tables).with_context(|| format!("reading {name}"))?;
+        dispatch_snapshot(&tables).with_context(|| format!("reading {name}"))?;
     app.with_db(|c| store::save_snapshot(c, &snap))?;
 
     let transitions: Vec<Transition> = {
@@ -142,27 +142,29 @@ pub async fn run(app: App) {
     ));
     daily.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut housekeeping = tokio::time::interval(Duration::from_secs(6 * 3600));
-    let mut backoff = 0u32;
+    let mut failures = 0u32;
+    let mut skip = 0u32;
 
     loop {
         tokio::select! {
             _ = poll.tick() => {
-                if backoff > 0 {
-                    // Skip ticks while backing off after errors (max ~5 minutes).
-                    backoff -= 1;
+                if skip > 0 {
+                    skip -= 1;
                     continue;
                 }
                 match poll_dispatch(&app, &engine, &client).await {
                     Ok(_) => {
+                        failures = 0;
                         if let Ok(mut h) = app.health.write() {
                             h.last_poll_ok = Some(Utc::now());
                             h.last_error = None;
                         }
                     }
                     Err(e) => {
-                        tracing::warn!("dispatch poll failed: {e:#}");
+                        failures += 1;
+                        skip = backoff_ticks(failures);
+                        tracing::warn!(failures, skip, "dispatch poll failed: {e:#}");
                         if let Ok(mut h) = app.health.write() { h.last_error = Some(format!("{e:#}")); }
-                        backoff = (backoff + 1).min(15);
                     }
                 }
             }
@@ -178,6 +180,15 @@ pub async fn run(app: App) {
                 }
             }
         }
+    }
+}
+
+/// Poll ticks to skip after `failures` consecutive errors: 1, 2, 4, 8, then 15
+/// (about five minutes at the default 20 s poll).
+pub fn backoff_ticks(failures: u32) -> u32 {
+    match failures {
+        0 => 0,
+        f => (1u32 << (f - 1).min(4)).min(15),
     }
 }
 
@@ -267,4 +278,50 @@ pub async fn promote_ready_events(app: &App) -> Result<()> {
         .await;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_grows_then_caps() {
+        let ticks: Vec<u32> = (0..8).map(backoff_ticks).collect();
+        assert_eq!(ticks, [0, 1, 2, 4, 8, 15, 15, 15]);
+    }
+
+    /// P0.4 acceptance: replay archived DispatchIS files for 12 October 2026.
+    /// Run with `NEM_OCT12_DIR=<dir> cargo test -- --ignored oct12`.
+    #[tokio::test]
+    #[ignore = "needs archived AEMO files in NEM_OCT12_DIR"]
+    async fn oct12_nsw_event_matches_published_figures() {
+        let dir = std::env::var("NEM_OCT12_DIR").expect("set NEM_OCT12_DIR");
+        let mut cfg = crate::config::Config::default();
+        cfg.store.path = ":memory:".into();
+        let mut app = App::new(cfg, store::open(":memory:").unwrap(), "replay").unwrap();
+        app.notify_external = false;
+        app.fire_triggers = false;
+        replay_dir(&app, Path::new(&dir), Duration::ZERO)
+            .await
+            .unwrap();
+        let events = app
+            .with_db(|c| {
+                store::list_events(
+                    c,
+                    &store::EventFilter {
+                        region: Some("NSW1"),
+                        status: None,
+                        include_discarded: false,
+                        limit: 50,
+                    },
+                )
+            })
+            .unwrap();
+        let ev = events
+            .iter()
+            .find(|e| e.trading_day == "2026-10-12" && e.peak_price >= 23_000.0)
+            .expect("an NSW1 event on 12 October");
+        assert_eq!(ev.peak_price, 23_107.0);
+        assert_eq!(ev.intervals_above_high, 11);
+    }
 }

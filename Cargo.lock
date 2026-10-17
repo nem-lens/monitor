@@ -981,20 +981,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "nem-lens-aemo"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "chrono-tz",
+ "csv",
+ "regex",
+ "serde",
+ "zip",
+]
+
+[[package]]
 name = "nem-monitor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
  "chrono",
- "chrono-tz",
  "clap",
- "csv",
  "futures-util",
  "hex",
  "hmac",
+ "nem-lens-aemo",
  "rand 0.8.8",
- "regex",
  "reqwest",
  "rusqlite",
  "serde",
@@ -1003,11 +1014,11 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "toml",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
  "url",
- "zip",
 ]
 
 [[package]]

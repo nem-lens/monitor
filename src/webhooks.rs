@@ -6,6 +6,7 @@
 //! limited per IP, and endpoints that keep failing are disabled. Deliveries are
 //! signed with HMAC-SHA256 over "<timestamp>.<body>".
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
@@ -68,10 +69,15 @@ pub fn is_public_ip(ip: IpAddr) -> bool {
             !(v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_multicast()
+                || seg[..6].iter().all(|s| *s == 0) // ::/96 IPv4-compatible (deprecated)
                 || (seg[0] & 0xfe00) == 0xfc00 // unique local
                 || (seg[0] & 0xffc0) == 0xfe80 // link local
+                || (seg[0] & 0xffc0) == 0xfec0 // site local (deprecated)
                 || (seg[0] == 0x2001 && seg[1] == 0x0db8) // documentation
+                || (seg[0] == 0x2001 && seg[1] == 0x0000) // Teredo, embeds an IPv4 address
+                || seg[0] == 0x2002 // 6to4, embeds an IPv4 address
                 || (seg[0] == 0x0064 && seg[1] == 0xff9b) // NAT64
+                || (seg[0] == 0x0100 && seg[1..4].iter().all(|s| *s == 0)) // discard 100::/64
                 || v6 == Ipv6Addr::UNSPECIFIED)
         }
     }
@@ -135,11 +141,13 @@ pub async fn check_target(raw: &str, allow_http: bool) -> Result<(url::Url, Sock
 }
 
 /// A client pinned to the address we checked (defeats DNS rebinding), with
-/// redirects disabled.
+/// redirects disabled. Proxies are ignored: a proxy would resolve the host
+/// itself and bypass the pin.
 fn pinned_client(app: &App, url: &url::Url, addr: SocketAddr) -> reqwest::Result<reqwest::Client> {
     let mut b = reqwest::Client::builder()
         .user_agent(app.cfg.source.user_agent.clone())
         .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
         .timeout(Duration::from_secs(10));
     if let Some(host) = url.host_str() {
         b = b.resolve(host, addr);
@@ -149,20 +157,40 @@ fn pinned_client(app: &App, url: &url::Url, addr: SocketAddr) -> reqwest::Result
 
 fn rate_limited(app: &App, ip: IpAddr) -> bool {
     let limit = app.cfg.public.webhook_registrations_per_ip_per_hour;
-    let mut map = match app.reg_limiter.lock() {
-        Ok(m) => m,
-        Err(_) => return true,
-    };
-    let now = Instant::now();
+    match app.reg_limiter.lock() {
+        Ok(mut map) => check_rate(&mut map, ip, Instant::now(), limit),
+        Err(_) => true,
+    }
+}
+
+const RATE_WINDOW: Duration = Duration::from_secs(3600);
+/// Addresses tracked at once. Stale entries are dropped when the map fills;
+/// if it is still full, new addresses are refused (fail closed), which bounds
+/// memory when someone cycles through many addresses.
+const MAX_TRACKED_IPS: usize = 10_000;
+
+fn check_rate(
+    map: &mut HashMap<IpAddr, Vec<Instant>>,
+    ip: IpAddr,
+    now: Instant,
+    limit: usize,
+) -> bool {
+    let fresh = |t: &Instant| now.saturating_duration_since(*t) < RATE_WINDOW;
+    if map.len() >= MAX_TRACKED_IPS && !map.contains_key(&ip) {
+        map.retain(|_, v| {
+            v.retain(fresh);
+            !v.is_empty()
+        });
+        if map.len() >= MAX_TRACKED_IPS {
+            return true;
+        }
+    }
     let v = map.entry(ip).or_default();
-    v.retain(|t| now.duration_since(*t) < Duration::from_secs(3600));
+    v.retain(fresh);
     if v.len() >= limit {
         return true;
     }
     v.push(now);
-    if map.len() > 10_000 {
-        map.retain(|_, v| !v.is_empty());
-    }
     false
 }
 
@@ -391,15 +419,66 @@ mod tests {
             "fd00::1",
             "fe80::1",
             "::ffff:10.0.0.1",
+            "::",
+            "::a00:1",         // IPv4-compatible 10.0.0.1
+            "fec0::1",         // site local
+            "2002:a00:1::1",   // 6to4 wrapping 10.0.0.1
+            "2001:0:4136::1",  // Teredo
+            "64:ff9b::a00:1",  // NAT64
+            "100::1",          // discard
+            "2001:db8::1",     // documentation
+            "ff02::1",         // multicast
+            "198.18.0.1",      // benchmarking
+            "192.0.0.8",       // IETF protocol assignments
+            "240.0.0.1",       // reserved
+            "255.255.255.255", // broadcast
+            "203.0.113.5",     // documentation
         ] {
             assert!(
                 !is_public_ip(ip.parse().unwrap()),
                 "{ip} should be rejected"
             );
         }
-        for ip in ["1.1.1.1", "203.2.218.214", "2606:4700:4700::1111"] {
+        for ip in [
+            "1.1.1.1",
+            "203.2.218.214",
+            "2606:4700:4700::1111",
+            "2001:4860:4860::8888",
+            "::ffff:1.1.1.1",
+        ] {
             assert!(is_public_ip(ip.parse().unwrap()), "{ip} should be allowed");
         }
+    }
+
+    #[test]
+    fn rate_limit_window_and_memory_bound() {
+        let mut map = HashMap::new();
+        let ip: IpAddr = "203.0.113.1".parse().unwrap();
+        let t0 = Instant::now();
+        for _ in 0..5 {
+            assert!(!check_rate(&mut map, ip, t0, 5));
+        }
+        assert!(
+            check_rate(&mut map, ip, t0, 5),
+            "sixth in the hour is refused"
+        );
+        let later = t0 + RATE_WINDOW + Duration::from_secs(1);
+        assert!(!check_rate(&mut map, ip, later, 5), "window has passed");
+
+        // Fill the map with stale entries: a new address prunes them.
+        let mut map: HashMap<IpAddr, Vec<Instant>> = (0..MAX_TRACKED_IPS as u32)
+            .map(|i| (IpAddr::from(std::net::Ipv4Addr::from(i)), vec![t0]))
+            .collect();
+        assert!(!check_rate(&mut map, ip, later, 5));
+        assert_eq!(map.len(), 1);
+
+        // Full of fresh entries: new addresses are refused, known ones still counted.
+        let mut map: HashMap<IpAddr, Vec<Instant>> = (0..MAX_TRACKED_IPS as u32)
+            .map(|i| (IpAddr::from(std::net::Ipv4Addr::from(i)), vec![t0]))
+            .collect();
+        assert!(check_rate(&mut map, ip, t0, 5));
+        assert!(!check_rate(&mut map, "0.0.0.1".parse().unwrap(), t0, 5));
+        assert_eq!(map.len(), MAX_TRACKED_IPS);
     }
 
     #[tokio::test]
@@ -416,11 +495,23 @@ mod tests {
     }
 
     #[test]
-    fn signature_is_stable() {
-        // Known answer: HMAC-SHA256(key="whsec_test", msg="1700000000.{}")
-        let s = sign("whsec_test", 1_700_000_000, "{}");
-        assert_eq!(s.len(), 64);
-        assert_eq!(s, sign("whsec_test", 1_700_000_000, "{}"));
-        assert_ne!(s, sign("whsec_test", 1_700_000_001, "{}"));
+    fn signature_matches_known_answer() {
+        // HMAC-SHA256(key="whsec_test", msg="1700000000.{}"), computed independently
+        // with Python's hmac module, which is what receivers will use.
+        assert_eq!(
+            sign("whsec_test", 1_700_000_000, "{}"),
+            "35495024f4ef3f94e5a93e22221544c4b75e9a42300cd965ab81cb85cd994e91"
+        );
+        assert_ne!(
+            sign("whsec_test", 1_700_000_001, "{}"),
+            sign("whsec_test", 1_700_000_000, "{}")
+        );
+    }
+
+    #[test]
+    fn constant_eq_compares_whole_strings() {
+        assert!(constant_eq("abc", "abc"));
+        assert!(!constant_eq("abc", "abd"));
+        assert!(!constant_eq("abc", "ab"));
     }
 }

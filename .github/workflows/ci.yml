@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+# nem-lens-aemo is a path dependency (../aemo), so every job checks out
+# monitor/ and aemo/ side by side, as in a local NEM Lens checkout. While
+# nem-lens/aemo is private, set the NEM_LENS_READ_TOKEN secret to a token
+# with read access to it.
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: monitor
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: monitor
+      - uses: actions/checkout@v4
+        with:
+          repository: nem-lens/aemo
+          path: aemo
+          token: ${{ secrets.NEM_LENS_READ_TOKEN || github.token }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: monitor
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked
+      - run: cargo test --locked
+      - run: cargo build --locked
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: End-to-end smoke test (synthetic fixture)
+        run: python -I scripts/e2e_smoke.py
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: monitor
+      - uses: actions/checkout@v4
+        with:
+          repository: nem-lens/aemo
+          path: aemo
+          token: ${{ secrets.NEM_LENS_READ_TOKEN || github.token }}
+      - run: docker build -f monitor/Dockerfile -t nem-monitor .
+      - run: docker run --rm nem-monitor check-config
+
+  audit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: monitor
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: monitor
+      - uses: actions/checkout@v4
+        with:
+          repository: nem-lens/aemo
+          path: aemo
+          token: ${{ secrets.NEM_LENS_READ_TOKEN || github.token }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit

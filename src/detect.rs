@@ -619,5 +619,220 @@ mod tests {
         assert_eq!(money(-1000.0), "-1,000");
         assert_eq!(money(74.5), "74.50");
         assert_eq!(money(1234567.0), "1,234,567");
+        assert_eq!(money(0.0), "0.00");
+        assert_eq!(money(-0.5), "-0.50");
+        assert_eq!(money(999.6), "1,000");
+    }
+
+    /// Shaped on the synthetic 12 October fixture (scripts/make_fixture.py); not AEMO data.
+    const WHIPSAW: [f64; 27] = [
+        220.0, 1300.0, 766.0, 23107.0, 410.0, 9800.0, 1450.0, 16900.0, 880.0, 12400.0, 5400.0,
+        15200.0, 1900.0, 8700.0, 6300.0, 5600.0, 7400.0, 5200.0, 920.0, 480.0, 350.0, 300.0, 300.0,
+        300.0, 300.0, 300.0, 300.0,
+    ];
+
+    fn snaps_from(start: &str, prices: &[(f64, f64)]) -> Vec<DispatchSnapshot> {
+        let mut t = parse_market(start).unwrap();
+        prices
+            .iter()
+            .map(|(nsw, qld)| {
+                t += chrono::Duration::minutes(5);
+                snap(&t.format("%Y/%m/%d %H:%M:%S").to_string(), *nsw, *qld)
+            })
+            .collect()
+    }
+
+    fn nsw_only(prices: &[f64]) -> Vec<(f64, f64)> {
+        prices.iter().map(|p| (*p, 150.0)).collect()
+    }
+
+    /// Transitions with the wall-clock `updated_at` blanked, for comparison.
+    fn comparable(ts: Vec<Transition>) -> Vec<(TransitionKind, Event)> {
+        ts.into_iter()
+            .map(|mut t| {
+                t.event.updated_at.clear();
+                (t.kind, t.event)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn thresholds_are_inclusive() {
+        let quiet = [300.0; 6];
+        let (ts, _) = run(&[[200.0, 5000.0, 5000.0, 5000.0].as_slice(), &quiet].concat());
+        assert_eq!(names(&ts), ["opened", "confirmed", "closed"]);
+        let (ts, _) = run(&[[200.0, 4999.99, 4999.99, 4999.99].as_slice(), &quiet].concat());
+        assert!(ts.is_empty());
+        // Exactly the immediate-confirmation price.
+        let (ts, _) = run(&[200.0, 15000.0]);
+        assert_eq!(names(&ts), ["opened", "confirmed"]);
+    }
+
+    #[test]
+    fn closes_after_exactly_quiet_intervals() {
+        let (ts, d) = run(&[6000.0, 7000.0, 8000.0, 300.0, 300.0, 300.0, 300.0, 300.0]);
+        assert_eq!(names(&ts), ["opened", "confirmed"]);
+        assert_eq!(d.open_events().len(), 1);
+        let (ts, d) = run(&[
+            6000.0, 7000.0, 8000.0, 300.0, 300.0, 300.0, 300.0, 300.0, 300.0,
+        ]);
+        assert_eq!(names(&ts), ["opened", "confirmed", "closed"]);
+        assert!(d.open_events().is_empty());
+    }
+
+    #[test]
+    fn a_price_between_close_and_high_resets_the_quiet_count() {
+        let (ts, d) = run(&[
+            6000.0, 7000.0, 8000.0, 300.0, 300.0, 300.0, 300.0, 300.0, 2000.0, 300.0, 300.0, 300.0,
+            300.0, 300.0,
+        ]);
+        assert_eq!(names(&ts), ["opened", "confirmed"]);
+        assert_eq!(d.open_events()[0].last_active, "2026-10-12T13:45:00+10:00");
+    }
+
+    #[test]
+    fn escalation_before_confirmation_is_silent() {
+        let (ts, _) = run(&[6000.0, 12000.0, 7000.0]);
+        assert_eq!(names(&ts), ["opened", "confirmed"]);
+        assert_eq!(ts[1].event.severity, Severity::Extreme);
+        assert_eq!(ts[0].event.severity, Severity::High);
+    }
+
+    #[test]
+    fn event_trading_day_follows_the_04_00_boundary() {
+        let mut d = Detector::new(DetectCfg::default());
+        let ts: Vec<Transition> = snaps_from("2026/10/13 03:50:00", &nsw_only(&[16000.0]))
+            .iter()
+            .flat_map(|s| d.ingest(s))
+            .collect();
+        assert_eq!(
+            ts[0].event.trading_day, "2026-10-12",
+            "03:55 belongs to the previous day"
+        );
+        let mut d = Detector::new(DetectCfg::default());
+        let ts: Vec<Transition> = snaps_from("2026/10/13 04:00:00", &nsw_only(&[16000.0]))
+            .iter()
+            .flat_map(|s| d.ingest(s))
+            .collect();
+        assert_eq!(ts[0].event.trading_day, "2026-10-13");
+    }
+
+    #[test]
+    fn regions_are_tracked_independently() {
+        let mut d = Detector::new(DetectCfg::default());
+        let prices = [
+            (16000.0, 150.0),
+            (300.0, 16000.0),
+            (300.0, 300.0),
+            (300.0, 300.0),
+            (300.0, 300.0),
+            (300.0, 300.0),
+            (300.0, 300.0),
+        ];
+        let ts: Vec<Transition> = snaps_from("2026/10/12 13:00:00", &prices)
+            .iter()
+            .flat_map(|s| d.ingest(s))
+            .collect();
+        let summary: Vec<(&str, &str)> = ts
+            .iter()
+            .map(|t| (t.event.region.as_str(), t.kind.name()))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("NSW1", "opened"),
+                ("NSW1", "confirmed"),
+                ("QLD1", "opened"),
+                ("QLD1", "confirmed"),
+                ("NSW1", "closed"),
+            ]
+        );
+        assert_eq!(d.open_events()[0].region, "QLD1");
+    }
+
+    #[test]
+    fn earlier_and_duplicate_snapshots_are_ignored() {
+        let s = snaps_from("2026/10/12 13:00:00", &nsw_only(&[6000.0, 7000.0]));
+        let mut d = Detector::new(DetectCfg::default());
+        d.ingest(&s[1]);
+        let before = d.state_json();
+        assert!(d.ingest(&s[0]).is_empty());
+        assert!(d.ingest(&s[1]).is_empty());
+        assert_eq!(d.state_json(), before);
+    }
+
+    #[test]
+    fn a_missing_region_does_not_count_towards_closing() {
+        // Data gaps are not quiet intervals; the event stays open.
+        let mut d = Detector::new(DetectCfg::default());
+        let mut snaps = snaps_from("2026/10/12 13:00:00", &nsw_only(&[6000.0, 7000.0, 8000.0]));
+        let mut gap = snaps_from("2026/10/12 13:15:00", &[(0.0, 150.0); 8]);
+        for s in &mut gap {
+            s.regions.remove("NSW1");
+        }
+        snaps.extend(gap);
+        let ts: Vec<Transition> = snaps.iter().flat_map(|s| d.ingest(s)).collect();
+        assert_eq!(names(&ts), ["opened", "confirmed"]);
+        assert_eq!(d.open_events().len(), 1);
+    }
+
+    #[test]
+    fn separation_flag_needs_the_full_gap() {
+        let mut d = Detector::new(DetectCfg::default());
+        for s in snaps_from("2026/10/12 13:00:00", &[(6000.0, 1500.0), (6000.0, 1500.0)]) {
+            d.ingest(&s);
+        }
+        assert!(
+            !d.open_events()[0].has_flag("price_separation"),
+            "gap 4,500"
+        );
+        let mut d = Detector::new(DetectCfg::default());
+        for s in snaps_from("2026/10/12 13:00:00", &[(6000.0, 1000.0)]) {
+            d.ingest(&s);
+        }
+        assert!(d.open_events()[0].has_flag("price_separation"), "gap 5,000");
+    }
+
+    #[test]
+    fn demand_ramp_is_flagged() {
+        let mut d = Detector::new(DetectCfg::default());
+        let mut snaps = snaps_from("2026/10/12 13:00:00", &nsw_only(&[200.0; 12]));
+        snaps.extend(snaps_from("2026/10/12 14:00:00", &nsw_only(&[6000.0])));
+        for (i, s) in snaps.iter_mut().enumerate() {
+            s.regions.get_mut("NSW1").unwrap().demand = Some(10_000.0 + 140.0 * i as f64);
+        }
+        for s in &snaps {
+            d.ingest(s);
+        }
+        // 11 steps of 140 MW = 1,540 MW within the 12-interval window.
+        assert!(d.open_events()[0].has_flag("demand_ramp"));
+    }
+
+    #[test]
+    fn restoring_state_at_any_interval_matches_an_uninterrupted_run() {
+        let snaps = snaps_from("2026/10/12 13:55:00", &nsw_only(&WHIPSAW));
+        let mut whole = Detector::new(DetectCfg::default());
+        let expected = comparable(snaps.iter().flat_map(|s| whole.ingest(s)).collect());
+        assert_eq!(
+            expected.iter().map(|(k, _)| k.name()).collect::<Vec<_>>(),
+            ["opened", "confirmed", "flagged", "closed"]
+        );
+        for k in 0..=snaps.len() {
+            let mut a = Detector::new(DetectCfg::default());
+            let mut got: Vec<Transition> = snaps[..k].iter().flat_map(|s| a.ingest(s)).collect();
+            let mut b = Detector::restore(DetectCfg::default(), &a.state_json()).unwrap();
+            got.extend(snaps[k..].iter().flat_map(|s| b.ingest(s)));
+            assert_eq!(comparable(got), expected, "restart after interval {k}");
+        }
+    }
+
+    #[test]
+    fn whipsaw_series_counts_match_the_fixture() {
+        let (ts, _) = run(&WHIPSAW);
+        let closed = &ts.last().unwrap().event;
+        assert_eq!(closed.status, Status::Closed);
+        assert_eq!(closed.peak_price, 23107.0);
+        assert_eq!(closed.intervals_above_high, 11);
+        assert_eq!(closed.severity, Severity::Cap);
     }
 }

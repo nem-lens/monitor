@@ -16,11 +16,19 @@ Single Rust binary, SQLite storage, no other services required.
 | Demand ramp flag | ≥ 1,500 MW rise within 12 intervals | Context |
 | Low-price event | RRP ≤ −$900/MWh for 3 intervals | Closes when prices turn positive |
 | Close | 6 consecutive intervals below $1,000 | Unconfirmed events are discarded silently |
-| Next-day data | Next_Day_Dispatch and Next_Day_Offer_Energy present for the trading day | Promotes closed events to `next_day` tier, fires `data_ready` |
+| Next-day data | Next_Day_Dispatch and Next_Day_Offer_Energy_SPARSE present for the trading day | Promotes closed events to `next_day` tier, fires `data_ready` |
 
 Each event records peak, intervals beyond threshold, average price, peak demand, the most binding constraints and interconnectors at limit. All thresholds live in `config.toml`.
 
 ## Run it
+
+The NEMWeb parsers live in the shared [`nem-lens-aemo`](https://github.com/nem-lens/aemo) crate, a path dependency, so check both repos out side by side:
+
+```
+NEM-Lens/
+  aemo/       https://github.com/nem-lens/aemo
+  monitor/    this repo
+```
 
 ```sh
 cargo build --release
@@ -47,7 +55,7 @@ nem-monitor serve --replay fixtures/2026-10-12-synthetic --replay-delay-ms 300
 
 ## Deploy on an always-on machine
 
-1. Build the release binary (or the Docker image) and copy it to `/usr/local/bin/`.
+1. Build the release binary and copy it to `/usr/local/bin/`, or build the Docker image from the NEM-Lens root with `docker build -f monitor/Dockerfile .` (its config must bind `0.0.0.0:8080`).
 2. Put the config at `/etc/nem-monitor/config.toml`; keep `bind = "127.0.0.1:8080"`.
 3. Install `deploy/nem-monitor.service` and enable it: `systemctl enable --now nem-monitor`.
 4. Put `deploy/Caddyfile` in front for automatic HTTPS (it disables buffering on the live stream).
@@ -91,13 +99,27 @@ curl -X POST https://nem.example.org/api/webhooks \
 
 Before registering, the service POSTs `{"type":"verification","challenge":"…"}`; respond 200 with the challenge (plain or `{"challenge":"…"}`). Deliveries carry `X-NEM-Timestamp` and `X-NEM-Signature: sha256=HMAC_SHA256(secret, timestamp + "." + body)`. Delete with `DELETE /api/webhooks/{id}` and `Authorization: Bearer <manage_token>`; send a test with `POST /api/webhooks/{id}/test`.
 
-Safeguards for open registration: HTTPS only; every resolved address must be public (private, loopback, link-local, CGNAT and metadata ranges are refused) and the connection is pinned to the checked address; redirects are not followed; 5 registrations per IP per hour; 1,000 webhooks maximum; 3 retries then a strike, disabled after 10 consecutive failures.
+Safeguards for open registration: HTTPS only; every resolved address must be public (private, loopback, link-local, CGNAT, metadata, 6to4, Teredo and NAT64 ranges are refused) and the connection is pinned to the checked address, bypassing any configured proxy; redirects are not followed; 5 registrations per IP per hour; 1,000 webhooks maximum; 3 retries then a strike, disabled after 10 consecutive failures.
+
+## Testing
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test                                   # unit and HTTP router tests, Linux and Windows
+cargo build && python3 scripts/e2e_smoke.py  # end to end on the synthetic fixture
+python3 scripts/nemweb_canary.py --data-ready   # live NEMWeb assumptions (network)
+python3 scripts/check_gaps.py nem-monitor.db    # soak test: gaps in recorded intervals
+NEM_OCT12_DIR=path/to/archive cargo test -- --ignored oct12   # 12 Oct 2026 acceptance replay
+```
+
+CI (`.github/workflows/ci.yml`) runs formatting, clippy, tests and the end-to-end test on Linux and Windows, plus a Docker build and `cargo audit`. `nemweb-canary.yml` runs the live canary daily at 05:00 AEST.
 
 ## Layout
 
 ```
-src/aemo.rs       AEMO C/I/D CSV parser and DispatchIS snapshot
-src/nemweb.rs     listings, downloads, unzip
+src/nemweb.rs     listings and downloads (parsing in nem-lens-aemo)
+src/time.rs       market time (from nem-lens-aemo) plus the system clock
 src/detect.rs     the detector (pure, deterministic, restartable)
 src/notify.rs     plain-English titles and summaries, fan-out, ntfy
 src/triggers.rs   operator triggers

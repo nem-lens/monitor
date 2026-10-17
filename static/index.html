@@ -119,8 +119,7 @@ function spark(series) {
 async function loadStatus() {
   const s = await (await fetch("/api/status")).json();
   thresholds = s.thresholds;
-  const h = s.health || {};
-  const fresh = s.mode !== "live" || (h.last_poll_ok && (Date.now() - new Date(h.last_poll_ok)) < 10 * 60e3);
+  const fresh = s.fresh;
   const last = s.latest_interval ? `latest interval ${localTime(s.latest_interval, "NSW1")} ${localDate(s.latest_interval, "NSW1")}` : "no data yet";
   $("status").innerHTML = `<span class="dot ${fresh ? "live" : "stale"}"></span>${s.mode === "live" ? (fresh ? "Live" : "Feed delayed") : esc(s.mode)} · ${esc(last)}`;
   $("cards").innerHTML = s.regions.map((r) => `
@@ -200,7 +199,8 @@ async function openEvent(id, push) {
 }
 
 function copyRow(label, value) {
-  return `<div class="copy"><span>${esc(value)}</span><button onclick="navigator.clipboard.writeText('${esc(value)}')">Copy</button></div>`;
+  // The value travels in a data attribute: interpolating it into inline JS would let a quote break out.
+  return `<div class="copy"><span>${esc(value)}</span><button type="button" data-copy="${esc(value)}">Copy</button></div>`;
 }
 
 function renderSubscribe(sub) {
@@ -269,6 +269,10 @@ function connect() {
   const id = new URLSearchParams(location.search).get("event");
   if (id) openEvent(id, false);
   connect();
+  document.addEventListener("click", (ev) => {
+    const b = ev.target.closest("button[data-copy]");
+    if (b) navigator.clipboard.writeText(b.dataset.copy);
+  });
   setInterval(loadStatus, 60000);
   window.onpopstate = () => { const i = new URLSearchParams(location.search).get("event"); if (i) openEvent(i, false); };
 })();

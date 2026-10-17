@@ -4,7 +4,7 @@
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub server: ServerCfg,
     pub source: SourceCfg,
@@ -17,7 +17,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ServerCfg {
     pub bind: String,
     /// Public base URL, used in feeds and notification links.
@@ -29,7 +29,8 @@ pub struct ServerCfg {
 impl Default for ServerCfg {
     fn default() -> Self {
         Self {
-            bind: "0.0.0.0:8080".into(),
+            // Localhost only; expose through a reverse proxy, or set 0.0.0.0 in a container.
+            bind: "127.0.0.1:8080".into(),
             public_url: "http://localhost:8080".into(),
             trust_proxy_headers: false,
         }
@@ -37,7 +38,7 @@ impl Default for ServerCfg {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct SourceCfg {
     pub base_url: String,
     pub dispatch_dir: String,
@@ -60,13 +61,18 @@ impl Default for SourceCfg {
             backfill_hours: 6,
             user_agent: concat!("nem-monitor/", env!("CARGO_PKG_VERSION")).into(),
             data_ready_poll_secs: 600,
-            data_ready_dirs: vec!["Next_Day_Dispatch".into(), "Next_Day_Offer_Energy".into()],
+            // Next_Day_Offer_Energy is empty on NEMWeb (checked 17 Oct 2026);
+            // energy offers are published in the _SPARSE directory.
+            data_ready_dirs: vec![
+                "Next_Day_Dispatch".into(),
+                "Next_Day_Offer_Energy_SPARSE".into(),
+            ],
         }
     }
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct StoreCfg {
     pub path: String,
     pub retain_days: i64,
@@ -82,7 +88,7 @@ impl Default for StoreCfg {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct DetectCfg {
     pub regions: Vec<String>,
     /// AEMC market price cap for the current financial year ($23,200/MWh for 2026-27).
@@ -136,7 +142,7 @@ impl Default for DetectCfg {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct PublicCfg {
     pub site_title: String,
     /// Lowest severity that reaches public channels: "high", "extreme" or "cap".
@@ -173,6 +179,7 @@ impl Default for PublicCfg {
 /// event changes state. Commands run without a shell; placeholders are
 /// substituted per argument.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TriggerCfg {
     pub name: String,
     /// Transitions to fire on: opened, confirmed, escalated, flagged, closed, discarded, data_ready.
@@ -213,7 +220,25 @@ impl Config {
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
+        use crate::model::Severity;
+        anyhow::ensure!(
+            self.server.bind.parse::<std::net::SocketAddr>().is_ok(),
+            "server.bind must be an address and port, e.g. 127.0.0.1:8080"
+        );
+        anyhow::ensure!(
+            url::Url::parse(&self.server.public_url).is_ok(),
+            "server.public_url must be an absolute URL"
+        );
         let d = &self.detect;
+        anyhow::ensure!(!d.regions.is_empty(), "detect.regions must not be empty");
+        anyhow::ensure!(
+            d.confirm_intervals >= 1,
+            "confirm_intervals must be at least 1"
+        );
+        anyhow::ensure!(
+            d.cap_fraction > 0.0 && d.cap_fraction <= 1.0,
+            "cap_fraction must be in (0, 1]"
+        );
         anyhow::ensure!(
             d.high_price < d.extreme_price,
             "high_price must be below extreme_price"
@@ -225,15 +250,37 @@ impl Config {
         anyhow::ensure!(d.quiet_intervals >= 1, "quiet_intervals must be at least 1");
         anyhow::ensure!(d.whiplash_window >= 3, "whiplash_window must be at least 3");
         anyhow::ensure!(
-            crate::model::Severity::parse(&self.public.min_severity).is_some(),
+            Severity::parse(&self.public.min_severity).is_some(),
             "public.min_severity must be high, extreme or cap"
         );
         for t in &self.triggers {
             anyhow::ensure!(
-                t.command.is_some() || t.webhook.is_some(),
+                t.command.as_ref().is_some_and(|c| !c.is_empty()) || t.webhook.is_some(),
                 "trigger {} needs a command or a webhook",
                 t.name
             );
+            if let Some(s) = &t.min_severity {
+                // An unparsable severity would otherwise match every event.
+                anyhow::ensure!(
+                    Severity::parse(s).is_some(),
+                    "trigger {}: min_severity {s} must be floor, high, extreme or cap",
+                    t.name
+                );
+            }
+            for r in t.regions.iter().flatten() {
+                anyhow::ensure!(
+                    d.regions.contains(r),
+                    "trigger {}: region {r} is not in detect.regions",
+                    t.name
+                );
+            }
+            if let Some(w) = &t.webhook {
+                anyhow::ensure!(
+                    url::Url::parse(w).is_ok(),
+                    "trigger {}: webhook is not a valid URL",
+                    t.name
+                );
+            }
             for on in &t.on {
                 anyhow::ensure!(
                     crate::model::TRANSITIONS.contains(&on.as_str()),
@@ -243,5 +290,69 @@ impl Config {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(text: &str) -> anyhow::Result<Config> {
+        let cfg: Config = toml::from_str(text)?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    #[test]
+    fn example_config_parses_and_validates() {
+        let cfg = parse(include_str!("../deploy/config.example.toml")).unwrap();
+        assert_eq!(cfg.triggers.len(), 2);
+        assert_eq!(cfg.server.bind, "127.0.0.1:8080");
+    }
+
+    #[test]
+    fn defaults_bind_localhost_and_watch_sparse_offers() {
+        let cfg = parse("").unwrap();
+        assert_eq!(cfg.server.bind, "127.0.0.1:8080");
+        assert!(!cfg.server.trust_proxy_headers);
+        assert_eq!(
+            cfg.source.data_ready_dirs,
+            ["Next_Day_Dispatch", "Next_Day_Offer_Energy_SPARSE"]
+        );
+    }
+
+    #[test]
+    fn unknown_keys_are_rejected() {
+        let err = parse("[store]\nretain_day = 5\n").unwrap_err();
+        assert!(err.to_string().contains("retain_day"), "{err}");
+        assert!(
+            parse("[[triggers]]\nname = \"t\"\non = [\"closed\"]\ncomand = [\"x\"]\n").is_err()
+        );
+    }
+
+    #[test]
+    fn bad_trigger_settings_are_rejected() {
+        let t = |extra: &str| {
+            parse(&format!(
+                "[[triggers]]\nname = \"t\"\non = [\"closed\"]\ncommand = [\"x\"]\n{extra}"
+            ))
+        };
+        assert!(t("").is_ok());
+        assert!(t("min_severity = \"extrem\"").is_err());
+        assert!(t("regions = [\"NSW\"]").is_err());
+        assert!(
+            parse("[[triggers]]\nname = \"t\"\non = [\"closd\"]\ncommand = [\"x\"]\n").is_err()
+        );
+        assert!(parse("[[triggers]]\nname = \"t\"\non = [\"closed\"]\ncommand = []\n").is_err());
+    }
+
+    #[test]
+    fn bad_server_and_detect_settings_are_rejected() {
+        assert!(parse("[server]\nbind = \"localhost\"\n").is_err());
+        assert!(parse("[server]\npublic_url = \"nem.example.org\"\n").is_err());
+        assert!(parse("[detect]\nregions = []\n").is_err());
+        assert!(parse("[detect]\ncap_fraction = 1.5\n").is_err());
+        assert!(parse("[detect]\nconfirm_intervals = 0\n").is_err());
+        assert!(parse("[public]\nmin_severity = \"loud\"\n").is_err());
     }
 }

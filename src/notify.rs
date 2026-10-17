@@ -298,4 +298,107 @@ mod tests {
         assert!(summary.starts_with("3 intervals above $5,000/MWh between 3:10pm AEDT and 3:20pm AEDT on Mon 12 Oct 2026 (15 min)"), "{summary}");
         assert!(is_public(&tr.kind, &tr.event, &cfg));
     }
+
+    /// All transitions for an NSW1 price series starting 14:05 market time.
+    fn transitions(prices: &[f64]) -> Vec<Transition> {
+        let mut d = Detector::new(Config::default().detect);
+        let mut t = parse_market("2026/10/12 14:00:00").unwrap();
+        let mut out = Vec::new();
+        for p in prices {
+            t += chrono::Duration::minutes(5);
+            let mut s = DispatchSnapshot {
+                settlement: t,
+                ..Default::default()
+            };
+            s.regions.insert(
+                "NSW1".into(),
+                RegionInterval {
+                    rrp: *p,
+                    ..Default::default()
+                },
+            );
+            out.extend(d.ingest(&s));
+        }
+        out
+    }
+
+    const SPIKE: [f64; 11] = [
+        200.0, 6000.0, 7000.0, 12000.0, 23107.0, 300.0, 300.0, 300.0, 300.0, 300.0, 300.0,
+    ];
+
+    #[test]
+    fn titles_and_summaries_for_each_transition() {
+        let cfg = Config::default();
+        let ts = transitions(&SPIKE);
+        let got: Vec<(&str, String, String)> = ts
+            .iter()
+            .map(|t| {
+                let (title, summary) = compose(&t.kind, &t.event, &cfg);
+                (t.kind.name(), title, summary)
+            })
+            .collect();
+        assert_eq!(
+            got.iter().map(|g| (g.0, g.1.as_str())).collect::<Vec<_>>(),
+            [
+                ("opened", "NSW price watch: $6,000/MWh"),
+                ("confirmed", "NSW price spike: $12,000/MWh"),
+                ("escalated", "NSW price spike escalates: $23,107/MWh"),
+                ("closed", "NSW price event over: peak $23,107/MWh"),
+            ]
+        );
+        assert_eq!(
+            got[1].2,
+            "Spot prices in NSW rose above $5,000/MWh from 3:10pm AEDT. 3 intervals above $5,000/MWh so far; peak $12,000/MWh at 3:20pm AEDT."
+        );
+        assert_eq!(
+            got[2].2,
+            "NSW spot prices are now at the market price cap; peak $23,107/MWh at 3:25pm AEDT."
+        );
+
+        let closed = &ts.last().unwrap().event;
+        let ready = TransitionKind::DataReady {
+            tier: "next_day".into(),
+        };
+        let (title, summary) = compose(&ready, closed, &cfg);
+        assert_eq!(
+            title,
+            "Full data published for NSW event on Mon 12 Oct 2026"
+        );
+        assert!(summary.contains("trading day 2026-10-12"), "{summary}");
+    }
+
+    #[test]
+    fn public_channels_get_only_public_transitions() {
+        let mut cfg = Config::default();
+        let ts = transitions(&SPIKE);
+        let public: Vec<&str> = ts
+            .iter()
+            .filter(|t| is_public(&t.kind, &t.event, &cfg))
+            .map(|t| t.kind.name())
+            .collect();
+        assert_eq!(public, ["confirmed", "escalated", "closed"]);
+
+        let blip = transitions(&[6000.0, 300.0, 300.0, 300.0, 300.0, 300.0, 300.0]);
+        assert_eq!(names(&blip), ["opened", "discarded"]);
+        assert!(blip.iter().all(|t| !is_public(&t.kind, &t.event, &cfg)));
+
+        // Severity filter: the confirmed event was extreme at confirmation.
+        cfg.public.min_severity = "cap".into();
+        assert!(!is_public(&ts[1].kind, &ts[1].event, &cfg));
+        assert!(is_public(&ts[2].kind, &ts[2].event, &cfg));
+
+        let low = transitions(&[-950.0, -1000.0, -990.0]);
+        assert!(is_public(&low[1].kind, &low[1].event, &cfg));
+        cfg.public.include_low_price = false;
+        assert!(!is_public(&low[1].kind, &low[1].event, &cfg));
+    }
+
+    fn names(ts: &[Transition]) -> Vec<&'static str> {
+        ts.iter().map(|t| t.kind.name()).collect()
+    }
+
+    #[test]
+    fn ntfy_headers_are_ascii() {
+        assert_eq!(ascii_header("NSW – $23,107/MWh ⚡"), "NSW   $23,107/MWh  ");
+    }
 }

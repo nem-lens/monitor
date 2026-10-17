@@ -477,3 +477,133 @@ pub fn notifications_for_event(
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::RegionInterval;
+
+    fn db() -> Connection {
+        open(":memory:").unwrap()
+    }
+
+    #[test]
+    fn data_ready_needs_every_source_and_is_idempotent() {
+        let c = db();
+        let sources = vec!["A".to_string(), "B".to_string()];
+        assert!(record_data_ready(&c, "A", "2026-10-12", "a12.zip").unwrap());
+        assert!(!record_data_ready(&c, "A", "2026-10-12", "a12.zip").unwrap());
+        record_data_ready(&c, "A", "2026-10-13", "a13.zip").unwrap();
+        assert_eq!(latest_complete_day(&c, &sources).unwrap(), None);
+        record_data_ready(&c, "B", "2026-10-12", "b12.zip").unwrap();
+        assert_eq!(
+            latest_complete_day(&c, &sources).unwrap().as_deref(),
+            Some("2026-10-12")
+        );
+        assert_eq!(latest_complete_day(&c, &[]).unwrap(), None);
+    }
+
+    #[test]
+    fn webhooks_are_disabled_after_repeated_failures() {
+        let c = db();
+        let hook = Webhook {
+            id: "wh_1".into(),
+            url: "https://example.org/h".into(),
+            secret: "s".into(),
+            regions: Some(vec!["NSW1".into(), "QLD1".into()]),
+            min_severity: "high".into(),
+            failures: 0,
+        };
+        insert_webhook(&c, &hook, "hash", "203.0.113.1").unwrap();
+        assert_eq!(active_webhooks(&c).unwrap()[0].regions, hook.regions);
+        assert_eq!(webhook_result(&c, "wh_1", false, 3).unwrap(), 1);
+        assert_eq!(webhook_result(&c, "wh_1", true, 3).unwrap(), 0);
+        for _ in 0..3 {
+            webhook_result(&c, "wh_1", false, 3).unwrap();
+        }
+        assert!(active_webhooks(&c).unwrap().is_empty());
+        assert_eq!(count_webhooks(&c).unwrap(), 0);
+        assert_eq!(
+            get_webhook_manage_hash(&c, "wh_1").unwrap(),
+            Some(("hash".into(), "disabled".into()))
+        );
+    }
+
+    #[test]
+    fn prune_keeps_recent_intervals_only() {
+        let c = db();
+        let now = crate::time::now_market();
+        for t in [now - chrono::Duration::days(100), now] {
+            let mut s = DispatchSnapshot {
+                settlement: t,
+                ..Default::default()
+            };
+            s.regions.insert(
+                "NSW1".into(),
+                RegionInterval {
+                    rrp: 1.0,
+                    ..Default::default()
+                },
+            );
+            save_snapshot(&c, &s).unwrap();
+        }
+        prune(&c, 90).unwrap();
+        let left: i64 = c
+            .query_row("SELECT COUNT(*) FROM region_intervals", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 1);
+        assert_eq!(
+            latest_settlement(&c).unwrap(),
+            Some(crate::time::iso_market(now))
+        );
+    }
+
+    #[test]
+    fn notifications_keep_order_and_visibility() {
+        let c = db();
+        let ev: Event = serde_json::from_value(serde_json::json!({
+            "id": "e1", "region": "NSW1", "kind": "high_price", "status": "confirmed",
+            "severity": "high", "trading_day": "2026-10-12", "start": "2026-10-12T14:10:00+10:00",
+            "last_active": "2026-10-12T14:10:00+10:00", "end": null, "peak_price": 6000.0,
+            "peak_interval": "2026-10-12T14:10:00+10:00", "intervals_active": 1,
+            "intervals_above_high": 1, "intervals_above_extreme": 0, "mean_price": 6000.0,
+            "min_price": 6000.0, "flags": [], "constraints": [], "interconnectors_at_limit": [],
+            "demand_start": null, "demand_peak": null, "data_tier": "live", "updated_at": "x"
+        }))
+        .unwrap();
+        for (transition, public) in [("opened", false), ("confirmed", true), ("closed", true)] {
+            add_notification(
+                &c,
+                &NotificationItem {
+                    seq: 0,
+                    event_id: "e1".into(),
+                    transition: transition.into(),
+                    title: transition.into(),
+                    summary: String::new(),
+                    url: String::new(),
+                    created_at: "2026-10-12T04:10:00Z".into(),
+                    public,
+                    event: ev.clone(),
+                },
+            )
+            .unwrap();
+        }
+        let all: Vec<(i64, String)> = notifications_for_event(&c, "e1", false)
+            .unwrap()
+            .into_iter()
+            .map(|n| (n.seq, n.transition))
+            .collect();
+        assert_eq!(
+            all,
+            [
+                (1, "opened".to_string()),
+                (2, "confirmed".to_string()),
+                (3, "closed".to_string())
+            ]
+        );
+        let public = list_notifications(&c, true, 0, 50).unwrap();
+        assert_eq!(public.len(), 2);
+        assert_eq!(public[0].transition, "closed", "newest first");
+        assert_eq!(list_notifications(&c, true, 2, 50).unwrap().len(), 1);
+    }
+}

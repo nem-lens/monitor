@@ -1,0 +1,39 @@
+name: NEMWeb canary
+
+# Checks the live NEMWeb assumptions daily: listing freshness, a replay of the
+# newest DispatchIS files with no warnings, and next-day files present for the
+# previous trading day. Not a merge gate; a failure means AEMO changed something
+# (or the runner cannot reach NEMWeb, which P2 hosting depends on).
+
+on:
+  schedule:
+    - cron: "0 19 * * *" # 05:00 AEST, after next-day files publish (~04:15)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: monitor
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: monitor
+      - uses: actions/checkout@v4
+        with:
+          repository: nem-lens/aemo
+          path: aemo
+          token: ${{ secrets.NEM_LENS_READ_TOKEN || github.token }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: monitor
+      - run: cargo build --locked
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -I scripts/nemweb_canary.py --files 12 --data-ready

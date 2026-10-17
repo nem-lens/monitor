@@ -67,13 +67,7 @@ async fn index(State(app): State<App>) -> Html<String> {
 
 async fn healthz(State(app): State<App>) -> Response {
     let h = app.health.read().map(|h| h.clone()).unwrap_or_default();
-    let fresh = match h.mode.as_str() {
-        "live" => h
-            .last_poll_ok
-            .is_some_and(|t| (chrono::Utc::now() - t).num_minutes() < 10),
-        _ => true,
-    };
-    let code = if fresh {
+    let code = if h.is_fresh(chrono::Utc::now()) {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
@@ -121,6 +115,7 @@ async fn status(State(app): State<App>) -> Result<Json<serde_json::Value>, ApiEr
     Ok(Json(serde_json::json!({
         "site_title": cfg.public.site_title,
         "mode": health.mode,
+        "fresh": health.is_fresh(chrono::Utc::now()),
         "latest_interval": latest,
         "health": health,
         "regions": regions,
@@ -259,12 +254,15 @@ async fn json_feed(State(app): State<App>) -> Result<Response, ApiError> {
         .into_response())
 }
 
+/// The client address. Behind a trusted proxy, use the LAST X-Forwarded-For
+/// entry: that is the one our proxy appended, while earlier entries come from
+/// the client and can be forged.
 fn client_ip(app: &App, headers: &HeaderMap, peer: SocketAddr) -> IpAddr {
     if app.cfg.server.trust_proxy_headers {
         if let Some(ip) = headers
             .get("x-forwarded-for")
             .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.split(',').next())
+            .and_then(|v| v.rsplit(',').next())
             .and_then(|v| v.trim().parse().ok())
         {
             return ip;
@@ -343,4 +341,155 @@ async fn admin_runs(
         .with_db(|c| store::list_runs(c, 100))
         .map_err(internal)?;
     Ok(Json(serde_json::json!({ "runs": runs })))
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Body;
+    use axum::extract::connect_info::MockConnectInfo;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    use super::*;
+    use crate::config::Config;
+
+    fn app_with(cfg: Config, mode: &str) -> App {
+        App::new(cfg, store::open(":memory:").unwrap(), mode).unwrap()
+    }
+
+    async fn call(app: &App, req: Request<Body>) -> (StatusCode, HeaderMap, String) {
+        let peer: SocketAddr = "203.0.113.9:5000".parse().unwrap();
+        let resp = router(app.clone())
+            .layer(MockConnectInfo(peer))
+            .oneshot(req)
+            .await
+            .unwrap();
+        let (parts, body) = resp.into_parts();
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        (
+            parts.status,
+            parts.headers,
+            String::from_utf8_lossy(&bytes).into(),
+        )
+    }
+
+    fn get(uri: &str) -> Request<Body> {
+        Request::get(uri).body(Body::empty()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn healthz_reflects_mode_and_freshness() {
+        let offline = app_with(Config::default(), "offline");
+        assert_eq!(call(&offline, get("/healthz")).await.0, StatusCode::OK);
+        // Live with no successful poll yet.
+        let live = app_with(Config::default(), "live");
+        assert_eq!(
+            call(&live, get("/healthz")).await.0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[tokio::test]
+    async fn json_api_shapes_and_errors() {
+        let app = app_with(Config::default(), "offline");
+        let (st, h, body) = call(&app, get("/api/status")).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(h[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("application/json"));
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["regions"].as_array().unwrap().len(), 5);
+        assert_eq!(v["fresh"], true);
+
+        let (st, _, body) = call(&app, get("/api/events/nope")).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        assert!(body.contains("event not found"));
+        let (st, _, body) = call(&app, get("/api/events?limit=100000")).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body, r#"{"events":[]}"#);
+    }
+
+    #[tokio::test]
+    async fn feeds_and_page_have_content_types_and_escaping() {
+        let mut cfg = Config::default();
+        cfg.public.site_title = "NEM <Watch> & Co".into();
+        let app = app_with(cfg, "offline");
+        let (st, h, body) = call(&app, get("/feed.atom")).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(h[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("application/atom+xml"));
+        assert!(body.contains("<title>NEM &lt;Watch&gt; &amp; Co</title>"));
+        let (_, h, _) = call(&app, get("/feed.json")).await;
+        assert!(h[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("application/feed+json"));
+        let (_, _, page) = call(&app, get("/")).await;
+        assert!(!page.contains("{{SITE_TITLE}}"));
+        assert!(page.contains("NEM &lt;Watch&gt; &amp; Co"));
+    }
+
+    #[tokio::test]
+    async fn cors_is_open_for_reads() {
+        let app = app_with(Config::default(), "offline");
+        let req = Request::get("/api/events")
+            .header("origin", "https://elsewhere.example")
+            .body(Body::empty())
+            .unwrap();
+        let (_, h, _) = call(&app, req).await;
+        assert_eq!(h["access-control-allow-origin"], "*");
+    }
+
+    #[tokio::test]
+    async fn admin_and_webhook_management_need_tokens() {
+        let app = app_with(Config::default(), "offline");
+        assert_eq!(
+            call(&app, get("/api/admin/runs")).await.0,
+            StatusCode::NOT_FOUND
+        );
+        let del = Request::delete("/api/webhooks/wh_x")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(call(&app, del).await.0, StatusCode::UNAUTHORIZED);
+        let del = Request::delete("/api/webhooks/wh_x")
+            .header("authorization", "Bearer mt_wrong")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(call(&app, del).await.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn webhook_registration_is_refused_when_capacity_is_zero() {
+        let mut cfg = Config::default();
+        cfg.public.max_webhooks = 0;
+        let app = app_with(cfg, "offline");
+        let req = Request::post("/api/webhooks")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"url":"https://example.org/hook"}"#))
+            .unwrap();
+        let (st, _, body) = call(&app, req).await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    }
+
+    #[test]
+    fn client_ip_uses_the_last_forwarded_hop_only_when_trusted() {
+        let peer: SocketAddr = "10.0.0.2:1234".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "6.6.6.6, 203.0.113.7".parse().unwrap());
+        let untrusted = app_with(Config::default(), "offline");
+        assert_eq!(
+            client_ip(&untrusted, &headers, peer).to_string(),
+            "10.0.0.2"
+        );
+        let mut cfg = Config::default();
+        cfg.server.trust_proxy_headers = true;
+        let trusted = app_with(cfg, "offline");
+        assert_eq!(
+            client_ip(&trusted, &headers, peer).to_string(),
+            "203.0.113.7"
+        );
+    }
 }

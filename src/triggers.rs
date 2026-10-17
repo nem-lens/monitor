@@ -95,12 +95,21 @@ pub async fn run_command(
         Ok(c) => c,
         Err(e) => return (None, format!("spawn failed: {e}")),
     };
-    if let Some(mut stdin) = child.stdin.take() {
+    // Write stdin alongside the wait, inside the timeout: a child that never
+    // reads stdin would otherwise block the write, and with it the timeout.
+    let writer = child.stdin.take().map(|mut stdin| {
         let json = serde_json::to_vec(item).unwrap_or_default();
-        let _ = stdin.write_all(&json).await;
-        drop(stdin);
+        tokio::spawn(async move {
+            let _ = stdin.write_all(&json).await;
+        })
+    });
+    let result =
+        tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await;
+    if let Some(w) = writer {
+        // The child has exited or been killed, so the pipe is closed and the write ends.
+        w.abort();
     }
-    match tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await {
+    match result {
         Ok(Ok(out)) => {
             let text = format!(
                 "{}{}",
@@ -171,29 +180,73 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn runs_command_with_stdin_env_and_placeholders() {
-        let argv: Vec<String> = [
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Echoes the {event_id} placeholder and NEM_REGION, then the start of stdin.
+    #[cfg(unix)]
+    fn echo_cmd() -> Vec<String> {
+        argv(&[
             "sh",
             "-c",
             "echo arg=$0 env=$NEM_REGION; head -c 20",
             "{event_id}",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-        let (code, out) = run_command(&argv, 10, &item()).await;
-        assert_eq!(code, Some(0));
+        ])
+    }
+
+    #[cfg(windows)]
+    fn echo_cmd() -> Vec<String> {
+        argv(&[
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            r#"Write-Output "arg={event_id} env=$env:NEM_REGION"; $input | Select-Object -First 1"#,
+        ])
+    }
+
+    /// Runs for about `secs` seconds and never reads stdin.
+    #[cfg(unix)]
+    fn sleep_cmd(secs: u32) -> Vec<String> {
+        argv(&["sleep", &secs.to_string()])
+    }
+
+    #[cfg(windows)]
+    fn sleep_cmd(secs: u32) -> Vec<String> {
+        argv(&["ping", "-n", &(secs + 1).to_string(), "127.0.0.1"])
+    }
+
+    #[tokio::test]
+    async fn runs_command_with_stdin_env_and_placeholders() {
+        let (code, out) = run_command(&echo_cmd(), 30, &item()).await;
+        assert_eq!(code, Some(0), "{out}");
         assert!(out.contains("arg=202610121410-NSW1-high env=NSW1"), "{out}");
         assert!(out.contains("{\"seq\":1"), "{out}");
     }
 
     #[tokio::test]
     async fn kills_on_timeout() {
-        let argv: Vec<String> = ["sleep", "5"].iter().map(|s| s.to_string()).collect();
-        let (code, out) = run_command(&argv, 1, &item()).await;
+        let (code, out) = run_command(&sleep_cmd(5), 1, &item()).await;
         assert_eq!(code, None);
-        assert!(out.contains("timed out"));
+        assert!(out.contains("timed out"), "{out}");
+    }
+
+    /// A payload larger than the pipe buffer, sent to a command that never
+    /// reads stdin, must not stop the timeout from applying.
+    #[tokio::test]
+    async fn timeout_applies_when_stdin_is_never_read() {
+        let mut big = item();
+        big.summary = "x".repeat(3 << 20);
+        let started = std::time::Instant::now();
+        let res = tokio::time::timeout(
+            Duration::from_secs(20),
+            run_command(&sleep_cmd(30), 2, &big),
+        )
+        .await;
+        let (code, out) = res.expect("run_command hung past its own timeout");
+        assert_eq!(code, None);
+        assert!(out.contains("timed out"), "{out}");
+        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     #[test]

@@ -6,7 +6,6 @@
 //!   nem-monitor -c config.toml mark-data-ready DAY   simulate next-day data for testing
 //!   nem-monitor -c config.toml check-config
 
-mod aemo;
 mod app;
 mod config;
 mod detect;

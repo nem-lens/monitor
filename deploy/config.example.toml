@@ -5,7 +5,7 @@ max_concurrent_triggers = 2
 [server]
 bind = "127.0.0.1:8080"                 # keep on localhost; Caddy terminates TLS in front
 public_url = "https://nem.example.org"  # CHANGE: used in feeds and notification links
-trust_proxy_headers = true              # true only behind your own reverse proxy
+trust_proxy_headers = true              # NOT the default (false): true only behind your own reverse proxy
 
 [source]
 base_url = "https://nemweb.com.au/Reports/Current"
@@ -14,10 +14,10 @@ poll_secs = 20
 backfill_hours = 6
 user_agent = "nem-monitor/0.1 (+https://nem.example.org; ops@example.org)"  # CHANGE: identify yourself to AEMO
 data_ready_poll_secs = 600
-data_ready_dirs = ["Next_Day_Dispatch", "Next_Day_Offer_Energy"]
+data_ready_dirs = ["Next_Day_Dispatch", "Next_Day_Offer_Energy_SPARSE"]
 
 [store]
-path = "/var/lib/nem-monitor/nem-monitor.db"
+path = "/var/lib/nem-monitor/nem-monitor.db"  # NOT the default (nem-monitor.db in the working directory)
 retain_days = 90
 
 [detect]

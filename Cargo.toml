@@ -4,19 +4,20 @@ version = "0.1.0"
 edition = "2021"
 description = "Always-on NEM event detector: polls AEMO NEMWeb, detects price events, fires triggers and publishes public feeds"
 license = "Apache-2.0"
+repository = "https://github.com/nem-lens/monitor"
 
 [dependencies]
 anyhow = "1"
 axum = { version = "0.8", features = ["macros"] }
 chrono = { version = "0.4", features = ["serde"] }
-chrono-tz = "0.10"
 clap = { version = "4", features = ["derive"] }
-csv = "1"
 futures-util = "0.3"
 hex = "0.4"
 hmac = "0.12"
+# Shared NEMWeb parsers. The path matches the NEM Lens checkout layout
+# (monitor/ and aemo/ side by side); CI checks both repos out the same way.
+nem-lens-aemo = { path = "../aemo" }
 rand = "0.8"
-regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
@@ -29,7 +30,9 @@ tower-http = { version = "0.6", features = ["cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
 
 [profile.release]
 lto = "thin"

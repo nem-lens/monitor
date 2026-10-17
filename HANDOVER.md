@@ -2,6 +2,8 @@
 
 Read this file and `README.md` first, then run `cargo test` and `cargo clippy` to confirm a clean baseline (20 tests passing, zero clippy warnings at handover).
 
+**Update, 17 Oct 2026.** The repo now lives in the `nem-lens` GitHub organisation as `monitor`, checked out beside `aemo` (the shared `nem-lens-aemo` crate, which holds the AEMO parser, market time and NEMWeb file handling formerly in `src/aemo.rs`, `src/time.rs` and `src/nemweb.rs`). The baseline is now 53 tests on Linux and Windows plus `scripts/e2e_smoke.py`; see "Testing" in `README.md`. P0.3 and P1.4 below are done, and P1.2 is implemented.
+
 ## 1. Context
 
 **Project.** A NEM counterfactual engine: replay AEMO dispatch for notable market events (first case, the 12 October 2026 NSW price spike) and re-clear with one input changed, in pure Rust compiling to WebAssembly. The full plan lives in a Claude Doc, "NEM Counterfactual Engine: Plan": https://claude.ai/code/artifact/eec10e78-daf9-435f-b86c-f7f8bc8bf313
@@ -79,6 +81,7 @@ Trigger commands on Windows use `powershell -Command ...` instead of `sh -c ...`
 2. Run live on the Windows laptop with the trial config for at least 48 hours.
    - **Accept when:** `/healthz` stays 200; `region_intervals` has no gaps over 10 minutes while awake; no parse warnings in logs.
 3. Confirm next-day filenames. `Next_Day_Dispatch` files look like `PUBLIC_NEXT_DAY_DISPATCH_20261016_0000000543289388.zip` (checked). The `Next_Day_Offer_Energy` pattern is assumed; confirm `nemweb::daily_files` matches it.
+   - **Done 17 Oct 2026:** `Next_Day_Offer_Energy` is empty on NEMWeb; offers are in `Next_Day_Offer_Energy_SPARSE` (`PUBLIC_NEXT_DAY_OFFER_ENERGY_SPARSE_20261016_0000000543293471.zip`), now the default. `scripts/nemweb_canary.py --data-ready` checks both directories daily in CI.
    - **Accept when:** `data_ready` table fills for both directories each morning after about 04:15 AEST.
 4. Validate detection on real history: fetch archived DispatchIS files for 12 October 2026 (NEMWeb Archive or MMSDM) and replay.
    - **Accept when:** an event confirms in NSW1 with peak $23,107/MWh and 11 intervals above $5,000, matching ABC and AEMO figures.
@@ -94,9 +97,9 @@ Trigger commands on Windows use `powershell -Command ...` instead of `sh -c ...`
 
 ### P1. Hardening
 1. `public.webhooks_enabled = false` switch (route returns 404 when off).
-2. Build webhook clients with `.no_proxy()` so address pinning holds behind corporate proxies.
+2. Build webhook clients with `.no_proxy()` so address pinning holds behind corporate proxies. (Implemented 17 Oct 2026; the proxy acceptance test is still to write.)
 3. Cap concurrent SSE connections (for example 200) and add a simple per-IP rate limit to the JSON API.
-4. Gate Unix-only tests; add a Windows CI job.
+4. Gate Unix-only tests; add a Windows CI job. (Done 17 Oct 2026: trigger tests have Unix and Windows variants; CI runs both.)
    - **Accept when:** tests pass on Linux and Windows; a proxy env var does not change which address webhooks connect to.
 
 ### P2. Option 1: GitHub Actions + Pages (owner's chosen hosting path)

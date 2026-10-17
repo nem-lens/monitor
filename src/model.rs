@@ -1,47 +1,9 @@
-//! Core types: market snapshots, events and transitions.
-
-use std::collections::BTreeMap;
+//! Core types: events and transitions. Market snapshots come from the shared
+//! `nem-lens-aemo` crate.
 
 use chrono::NaiveDateTime;
+pub use nem_lens_aemo::{DispatchSnapshot, RegionInterval};
 use serde::{Deserialize, Serialize};
-
-/// One dispatch interval as published in a DispatchIS file.
-#[derive(Debug, Clone, Default)]
-pub struct DispatchSnapshot {
-    pub settlement: NaiveDateTime,
-    pub regions: BTreeMap<String, RegionInterval>,
-    pub constraints: Vec<ConstraintRow>,
-    pub interconnectors: Vec<InterconnectorRow>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RegionInterval {
-    pub rrp: f64,
-    pub demand: Option<f64>,
-    pub available_gen: Option<f64>,
-    pub net_interchange: Option<f64>,
-}
-
-/// RHS and LHS are kept for the replay engine; the detector uses marginal and violation.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Default)]
-pub struct ConstraintRow {
-    pub id: String,
-    pub rhs: Option<f64>,
-    pub lhs: Option<f64>,
-    pub marginal: f64,
-    pub violation: f64,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Default)]
-pub struct InterconnectorRow {
-    pub id: String,
-    pub flow: f64,
-    pub export_limit: Option<f64>,
-    pub import_limit: Option<f64>,
-    pub marginal: f64,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
