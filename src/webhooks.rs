@@ -140,6 +140,22 @@ pub async fn check_target(raw: &str, allow_http: bool) -> Result<(url::Url, Sock
     Ok((url, addrs[0]))
 }
 
+/// An error and its causes, e.g. "error sending request: client error
+/// (Connect): Connection refused", so a registrant can see why it failed.
+fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut src = e.source();
+    while let Some(s) = src {
+        let s_text = s.to_string();
+        if !out.contains(&s_text) {
+            out.push_str(": ");
+            out.push_str(&s_text);
+        }
+        src = s.source();
+    }
+    out
+}
+
 /// A client pinned to the address we checked (defeats DNS rebinding), with
 /// redirects disabled. Proxies are ignored: a proxy would resolve the host
 /// itself and bypass the pin.
@@ -246,7 +262,10 @@ pub async fn register(app: &App, req: RegisterReq, ip: IpAddr) -> Result<Registe
         .map_err(|e| {
             ApiError(
                 400,
-                format!("verification request failed: {}", e.without_url()),
+                format!(
+                    "verification request failed: {}",
+                    error_chain(&e.without_url())
+                ),
             )
         })?;
     if !resp.status().is_success() {

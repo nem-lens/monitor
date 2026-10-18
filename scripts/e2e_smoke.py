@@ -14,6 +14,7 @@ Usage: e2e_smoke.py [--keep]
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -62,6 +63,11 @@ def toml_list(argv):
     return "[" + ", ".join(json.dumps(a) for a in argv) + "]"
 
 
+def port_open(port):
+    with socket.create_connection(("127.0.0.1", port), timeout=1):
+        return True
+
+
 def wait_for(pred, timeout):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -106,6 +112,10 @@ timeout_secs = 3
 """)
     env = dict(os.environ, NEM_TEST_ALLOW_PRIVATE_WEBHOOKS="1", NEM_ADMIN_TOKEN=ADMIN, RUST_LOG="nem_monitor=info")
     recv = subprocess.Popen([sys.executable, "-I", str(REPO / "scripts" / "test_receiver.py"), str(HOOK_PORT), str(log)])
+    # The server verifies the webhook as soon as it is registered, so the
+    # receiver must be listening first (on fast runners it may not be yet).
+    if not wait_for(lambda: port_open(HOOK_PORT), 15):
+        sys.exit("webhook receiver did not start")
     srv = subprocess.Popen([str(EXE), "-c", str(cfg), "serve", "--replay", str(fixture), "--replay-delay-ms", "150"],
                            env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
