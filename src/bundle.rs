@@ -151,6 +151,10 @@ pub struct StaticData {
     /// Month whose INTERCONNECTORCONSTRAINT history was sliced.
     #[serde(default)]
     pub interconnector_month: Option<String>,
+    /// Month whose DUALLOC and GENUNITS (unit fuels and capacities) were
+    /// sliced.
+    #[serde(default)]
+    pub fuel_month: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -531,6 +535,16 @@ const DUDETAIL: (&str, &str, &str) = (
     "DUDETAILSUMMARY",
     "static_dudetailsummary.parquet",
 );
+const DUALLOC: (&str, &str, &str) = (
+    "PARTICIPANT_REGISTRATION_DUALLOC",
+    "DUALLOC",
+    "static_dualloc.parquet",
+);
+const GENUNITS: (&str, &str, &str) = (
+    "PARTICIPANT_REGISTRATION_GENUNITS",
+    "GENUNITS",
+    "static_genunits.parquet",
+);
 
 /// Constraint versions invoked in the bundle's dispatch_constraint table.
 fn invoked_versions(dir: &Path) -> Result<BTreeSet<ConstraintVersion>> {
@@ -772,11 +786,51 @@ pub fn add_static(dir: &Path, mmsdm: &Path) -> Result<Manifest> {
         dudetail_month = Some(month.clone());
     }
 
-    for (key, _, file) in STATIC_TABLES
-        .iter()
-        .copied()
-        .chain([INTERCONNECTOR, (key, folder, file)])
-    {
+    // Unit fuels and capacities: each DUID's generating sets (DUALLOC,
+    // allocations effective by the window start), then those sets
+    // (GENUNITS). Both are full histories, so the newest month will do.
+    let (al_key, al_folder, _) = DUALLOC;
+    let (gu_key, gu_folder, _) = GENUNITS;
+    let fuel_month = latest(al_folder).filter(|mo| !mmsdm_files(mmsdm, mo, gu_folder).is_empty());
+    if let Some(month) = &fuel_month {
+        let mut gensets: BTreeSet<String> = BTreeSet::new();
+        for path in mmsdm_files(mmsdm, month, al_folder) {
+            let (bytes, tables) = read_mmsdm(&path, |r| {
+                r.text("EFFECTIVEDATE")
+                    .and_then(parse_market)
+                    .is_some_and(|e| e <= window_start)
+                    && units
+                        .as_ref()
+                        .is_none_or(|u| r.text("DUID").is_some_and(|d| u.contains(d.trim())))
+            })?;
+            if let Some(t) = tables.get(al_key) {
+                for row in &t.rows {
+                    if let Some(g) = t.col(row, "GENSETID") {
+                        gensets.insert(g.trim().to_string());
+                    }
+                }
+                bufs.entry(al_key).or_default().add(t);
+            }
+            record_source(&mut m, &path, &bytes, month);
+        }
+        for path in mmsdm_files(mmsdm, month, gu_folder) {
+            let (bytes, tables) = read_mmsdm(&path, |r| {
+                r.text("GENSETID")
+                    .is_some_and(|g| gensets.contains(g.trim()))
+            })?;
+            if let Some(t) = tables.get(gu_key) {
+                bufs.entry(gu_key).or_default().add(t);
+            }
+            record_source(&mut m, &path, &bytes, month);
+        }
+    }
+
+    for (key, _, file) in STATIC_TABLES.iter().copied().chain([
+        INTERCONNECTOR,
+        (key, folder, file),
+        DUALLOC,
+        GENUNITS,
+    ]) {
         if let Some(buf) = bufs.remove(key) {
             let sha = buf.write_parquet(&dir.join(file))?;
             m.outputs.retain(|o| o.file != file);
@@ -807,10 +861,94 @@ pub fn add_static(dir: &Path, mmsdm: &Path) -> Result<Manifest> {
         missing_equations: missing,
         dudetail_month,
         interconnector_month,
+        fuel_month,
     });
     m.updated_at = now_iso();
     m.save(dir)?;
     Ok(m)
+}
+
+/// NEMWeb market notice files (`NEMITWEB1_MKTNOTICE_<YYYYMMDD>.R<id>`) in a
+/// directory listing, with their dates.
+pub fn notice_files(listing: &str) -> Vec<(String, NaiveDate)> {
+    const TAG: &str = "NEMITWEB1_MKTNOTICE_";
+    let mut out = BTreeSet::new();
+    let mut rest = listing;
+    while let Some(i) = rest.find(TAG) {
+        let tail = &rest[i..];
+        let end = tail
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
+            .unwrap_or(tail.len());
+        let name = &tail[..end];
+        if let Some(d) = name
+            .get(TAG.len()..TAG.len() + 8)
+            .and_then(|d| NaiveDate::parse_from_str(d, "%Y%m%d").ok())
+        {
+            if name[TAG.len() + 8..].starts_with(".R") {
+                out.insert((name.to_string(), d));
+            }
+        }
+        rest = &tail[end.max(1)..];
+    }
+    out.into_iter().collect()
+}
+
+/// Add the AEMO market notices issued from six hours before the bundle's
+/// window to its end, fetched from NEMWeb's `Market_Notice` directory
+/// (`base` is its URL). They are kept as `market_notices.json`, each with
+/// its file, URL and SHA-256, which also go into the manifest's sources.
+/// NEMWeb keeps recent notices only, so run this soon after the event.
+pub async fn add_notices(dir: &Path, client: &reqwest::Client, base: &str) -> Result<usize> {
+    use crate::extract::{FetchedNotice, NOTICES_FILE};
+    let mut m = Manifest::load(dir)?;
+    let ws = parse_market(&m.window_start).context("manifest window_start")?;
+    let we = parse_market(&m.window_end).context("manifest window_end")?;
+    let from = ws - Duration::hours(6);
+    let base = base.trim_end_matches('/');
+    let listing = crate::nemweb::fetch_text(client, &format!("{base}/")).await?;
+    let mut kept = Vec::new();
+    for (name, day) in notice_files(&listing) {
+        if day < from.date() || day > we.date() {
+            continue;
+        }
+        let url = format!("{base}/{name}");
+        let bytes = crate::nemweb::fetch_bytes(client, &url).await?;
+        let Some(notice) =
+            nem_lens_aemo::event::parse_market_notice(&String::from_utf8_lossy(&bytes))
+        else {
+            continue;
+        };
+        let at = parse_market(&notice.issued);
+        if !at.is_some_and(|t| from <= t && t <= we) {
+            continue;
+        }
+        m.sources.retain(|s| s.file != name);
+        m.sources.push(Source {
+            file: name.clone(),
+            url: url.clone(),
+            sha256: sha256_hex(&bytes),
+            bytes: bytes.len() as u64,
+            role: "market_notice".into(),
+        });
+        kept.push(FetchedNotice {
+            file: name,
+            url,
+            sha256: sha256_hex(&bytes),
+            notice,
+        });
+    }
+    let text = serde_json::to_vec_pretty(&kept)?;
+    fs::write(dir.join(NOTICES_FILE), &text)?;
+    m.outputs.retain(|o| o.file != NOTICES_FILE);
+    m.outputs.push(Output {
+        file: NOTICES_FILE.into(),
+        table: "MARKET_NOTICE".into(),
+        rows: kept.len(),
+        sha256: sha256_hex(&text),
+    });
+    m.updated_at = now_iso();
+    m.save(dir)?;
+    Ok(kept.len())
 }
 
 fn record_source(m: &mut Manifest, path: &Path, bytes: &[u8], month: &str) {
@@ -937,6 +1075,17 @@ mod tests {
 
     fn t(s: &str) -> NaiveDateTime {
         parse_market(s).unwrap()
+    }
+
+    #[test]
+    fn notice_files_are_found_in_a_listing() {
+        let listing = r#"<A HREF="/Reports/CURRENT/Market_Notice/NEMITWEB1_MKTNOTICE_20261012.R145591">x</A>
+            <A HREF="/Reports/CURRENT/Market_Notice/NEMITWEB1_MKTNOTICE_20261010.R145544">y</A>
+            <A HREF="/Reports/CURRENT/Market_Notice/NEMITWEB1_MKTNOTICE_bad.R1">z</A>"#;
+        let f = notice_files(listing);
+        assert_eq!(f.len(), 2);
+        assert_eq!(f[1].0, "NEMITWEB1_MKTNOTICE_20261012.R145591");
+        assert_eq!(f[1].1, NaiveDate::from_ymd_opt(2026, 10, 12).unwrap());
     }
 
     #[test]

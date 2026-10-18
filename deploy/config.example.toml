@@ -59,8 +59,8 @@ api_requests_per_ip_per_minute = 120   # API and feeds, per client IP; 0 disable
 # Operator triggers run the rest of the pipeline. Commands run without a shell;
 # the notification JSON arrives on stdin and as NEM_* environment variables.
 
-# Replay with every scenario and publish to the event library once bids are
-# public (~04:15 next day); see deploy/publish-event.sh.
+# Store the event record privately and publish its public view (AEMO figures)
+# to the event library once bids are public (~04:15 next day); see deploy/publish-event.sh.
 [[triggers]]
 name = "publish"
 on = ["data_ready"]

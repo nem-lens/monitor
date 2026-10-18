@@ -1,28 +1,40 @@
 #!/bin/sh
-# Run by the data_ready trigger: replay the event with every scenario,
-# publish its headline to the event library and push the library.
+# Run by the data_ready trigger: add market notices to the event's bundle,
+# store its full record in the private event store, publish its public view
+# (AEMO figures only) to the event library, and push both.
 #
 #   publish-event.sh BUNDLE
 #
-# LIBRARY is a clone of nem-lens/library that this user can push to.
+# STORE is a clone of the private event store repository and LIBRARY a
+# clone of nem-lens/library, both pushable by this user. The engine is not
+# run here: replays and counterfactuals are computed on users' own machines.
 set -eu
 
 bundle=$1
-: "${NEMCF:=/opt/nemcf/bin/nemcf}"
 : "${NEM_MONITOR:=/usr/local/bin/nem-monitor}"
-: "${SCENARIOS:=/opt/nemcf/scenarios}"
+: "${STORE:=/var/lib/nem-monitor/events}"
 : "${LIBRARY:=/var/lib/nem-monitor/library}"
+id=${NEM_EVENT_ID:-$(basename "$bundle")}
 
-"$NEMCF" replay --bundle "$bundle" --scenario "$SCENARIOS" \
-  --out "$bundle/replay" --save-snapshots "$bundle/replay/snapshots.json"
+# NEMWeb keeps recent notices only; a failure here should not block publishing.
+"$NEM_MONITOR" bundle add-notices "$bundle" || echo "market notices not added" >&2
 
 # One publish at a time: triggers can run concurrently.
 exec 9>"$LIBRARY.lock"
 flock 9
+
+push() {
+  git -C "$1" add -A
+  if ! git -C "$1" diff --cached --quiet; then
+    git -C "$1" commit -q -m "$2 $id"
+    git -C "$1" push -q
+  fi
+}
+
+git -C "$STORE" pull -q --rebase
+"$NEM_MONITOR" store put "$bundle" --store "$STORE"
+push "$STORE" "Record"
+
 git -C "$LIBRARY" pull -q --rebase
-"$NEM_MONITOR" library add "$bundle" --out "$LIBRARY" --scenarios "$SCENARIOS"
-git -C "$LIBRARY" add -A
-if ! git -C "$LIBRARY" diff --cached --quiet; then
-  git -C "$LIBRARY" commit -q -m "Add ${NEM_EVENT_ID:-$(basename "$bundle")}"
-  git -C "$LIBRARY" push -q
-fi
+"$NEM_MONITOR" library add "$STORE/$id" --out "$LIBRARY"
+push "$LIBRARY" "Add"

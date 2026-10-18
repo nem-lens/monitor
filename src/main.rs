@@ -6,19 +6,23 @@
 //!   nem-monitor -c config.toml mark-data-ready DAY [--files DIR]   record next-day data
 //!   nem-monitor -c config.toml prune           trim the rolling buffer
 //!   nem-monitor -c config.toml once --state-in URL --site-out site/   static site (GitHub Pages)
-//!   nem-monitor library add BUNDLE --out LIB    publish a replayed event to the library
+//!   nem-monitor bundle add-notices BUNDLE       add AEMO market notices to a bundle
+//!   nem-monitor store put BUNDLE --store DIR   copy a bundle into the private event store
+//!   nem-monitor library add RECORD --out LIB   publish an event's public view to the library
 //!   nem-monitor -c config.toml check-config
 
 mod app;
 mod bundle;
 mod config;
 mod detect;
+mod extract;
 mod feeds;
 mod ingest;
 mod library;
 mod model;
 mod nemweb;
 mod notify;
+mod record;
 mod site;
 mod store;
 mod time;
@@ -100,10 +104,15 @@ enum Cmd {
         #[arg(long, value_name = "DIR")]
         replay: Option<PathBuf>,
     },
-    /// Public event library (headline results and browser inputs).
+    /// Public event library: the public view of each event record.
     Library {
         #[command(subcommand)]
         cmd: LibraryCmd,
+    },
+    /// Private event store: full event records (AEMO data only).
+    Store {
+        #[command(subcommand)]
+        cmd: StoreCmd,
     },
     /// Validate the configuration and exit.
     CheckConfig,
@@ -111,22 +120,26 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum LibraryCmd {
-    /// Publish a replayed event into the library and rebuild its index.
+    /// Publish an event's public view (AEMO figures only) into the library
+    /// and rebuild its index. Every file passes the event schema's public
+    /// gate first.
     Add {
-        /// The bundle directory, e.g. bundles/202610121420-NSW1-high.
-        bundle: PathBuf,
+        /// A bundle (bundles/<id>) or a record in the private store (STORE/<id>).
+        record: PathBuf,
         /// The library directory (a checkout of nem-lens/library).
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
-        /// nemcf replay output with prices.csv [default: BUNDLE/replay].
+    },
+}
+
+#[derive(Subcommand)]
+enum StoreCmd {
+    /// Copy a bundle's AEMO files into the private store as STORE/<id>/.
+    Put {
+        bundle: PathBuf,
+        /// The store directory (a checkout of nem-lens/events).
         #[arg(long, value_name = "DIR")]
-        replay: Option<PathBuf>,
-        /// nemcf snapshots file [default: REPLAY/snapshots.json].
-        #[arg(long, value_name = "FILE")]
-        snapshots: Option<PathBuf>,
-        /// Scenario files to publish alongside (those that were replayed).
-        #[arg(long, value_name = "DIR")]
-        scenarios: Option<PathBuf>,
+        store: PathBuf,
     },
 }
 
@@ -140,6 +153,9 @@ enum BundleCmd {
         #[arg(long, value_name = "DIR")]
         mmsdm: PathBuf,
     },
+    /// Add the AEMO market notices around the bundle's window, fetched from
+    /// NEMWeb (recent notices only).
+    AddNotices { dir: PathBuf },
 }
 
 #[tokio::main]
@@ -307,39 +323,41 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Library {
-            cmd:
-                LibraryCmd::Add {
-                    bundle,
-                    out,
-                    replay,
-                    snapshots,
-                    scenarios,
-                },
+        Cmd::Bundle {
+            cmd: BundleCmd::AddNotices { dir },
         } => {
-            let replay = replay.unwrap_or_else(|| bundle.join("replay"));
-            let h = library::add(
-                &library::Inputs {
-                    bundle: &bundle,
-                    replay: &replay,
-                    snapshots: snapshots.as_deref(),
-                    scenarios: scenarios.as_deref(),
-                },
-                &out,
-            )?;
+            let client = nemweb::client(&cfg.source.user_agent)?;
+            let base = format!(
+                "{}/Market_Notice",
+                cfg.source.base_url.trim_end_matches('/')
+            );
+            let n = bundle::add_notices(&dir, &client, &base).await?;
+            println!("{}: {n} market notices", dir.display());
+            Ok(())
+        }
+        Cmd::Store {
+            cmd: StoreCmd::Put { bundle, store },
+        } => {
+            let dir = record::put(&bundle, &store)?;
+            println!("stored {}", dir.display());
+            Ok(())
+        }
+        Cmd::Library {
+            cmd: LibraryCmd::Add { record, out },
+        } => {
+            let h = library::add(&record, &out)?;
             println!(
-                "{}: {} {} to {}, peak ${:.0}, baseline mean ${:.0}, {} scenarios",
+                "{}: {} {} to {}, peak ${:.0} at {}, mean ${:.0}, {} intervals >= $5,000, cost to load ${:.1}M",
                 h.event_id,
                 h.region,
                 h.start,
                 h.end,
                 h.peak_price,
-                h.baseline_mean_price,
-                h.scenarios.len()
+                h.peak_at,
+                h.mean_price,
+                h.intervals_above_5000,
+                h.cost_to_load / 1e6
             );
-            for s in &h.scenarios {
-                println!("  {}: {:+.0} $/MWh", s.name, s.mean_price_change);
-            }
             Ok(())
         }
         Cmd::Prune => {

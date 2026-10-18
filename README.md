@@ -44,9 +44,11 @@ nem-monitor -c config.toml replay DIR [--triggers] [--notify]     # saved Dispat
 nem-monitor -c config.toml serve --replay DIR --replay-delay-ms 500   # demo: replay through the live site
 nem-monitor -c config.toml mark-data-ready 2026-10-12 [--triggers] [--files DIR]   # next-day data (DIR: real zips)
 nem-monitor -c config.toml prune                                  # trim the 48-hour buffer now
-nem-monitor bundle add-static bundles/EVENT_ID --mmsdm DIR        # add MMSDM equations to a bundle
+nem-monitor bundle add-static bundles/EVENT_ID --mmsdm DIR        # add MMSDM equations, unit details and fuels
+nem-monitor bundle add-notices bundles/EVENT_ID                   # add AEMO market notices (recent events)
 nem-monitor -c pages.toml once --state-in URL --site-out site/    # static site (GitHub Pages)
-nem-monitor library add bundles/EVENT_ID --out LIB --scenarios DIR  # publish a replayed event
+nem-monitor store put bundles/EVENT_ID --store STORE              # full record into the private store
+nem-monitor library add STORE/EVENT_ID --out LIB                  # public view into the event library
 ```
 
 Try it offline with the synthetic fixture (shaped on the reported 12 October 2026 NSW event; not AEMO data):
@@ -75,21 +77,32 @@ The monitor stores event data only; AEMO's NEMWeb and MMSDM archives stay the gr
 
 - when the window (start minus 2 h to end plus 1 h) has passed: DispatchIS price, region totals, constraints and interconnectors, as Parquet;
 - when next-day data is public: unit dispatch, offer tracking and the day's bids, sliced to the window;
-- on request (`bundle add-static`): the MMSDM equations for every constraint version invoked, and unit registration details;
+- on request (`bundle add-static`): the MMSDM equations for every constraint version invoked, unit registration details, and unit fuels and capacities (DUALLOC and GENUNITS);
+- on request (`bundle add-notices`): AEMO market notices from six hours before the window to its end, fetched from NEMWeb's `Market_Notice` directory, which keeps recent notices only;
 - `manifest.json`: every AEMO source file with its URL and SHA-256, every output with its rows and SHA-256, and any equations not found.
 
 Query bundles with DuckDB; examples in [docs/duckdb-queries.md](docs/duckdb-queries.md). `scripts/bundle_check.py` re-verifies a bundle's hashes and figures.
 
-## Event library
+## Event records and the public library
 
-`nem-monitor library add BUNDLE --out LIB --scenarios DIR` publishes a replayed event into the public library ([nem-lens/library](https://github.com/nem-lens/library), served on GitHub Pages), where the browser runs scenarios with nemcf-wasm. It reads `BUNDLE/replay/prices.csv` and the nemcf snapshots, and writes:
+Each event has one record in the event schema (`nem_lens_aemo::event`, schema 2), every file and field tagged public or private.
 
-- `index.json`: every event's headline, newest first;
-- `events/<id>/headline.json`: peak price, duration, the baseline replay's mean price and each scenario's change in mean price, all over the event span (intervals ending from the event's start to its end, in its region);
-- `events/<id>/snapshots.json.gz`: the engine's intervals for the event span (2.2 MB for 12 Oct);
-- `events/<id>/scenarios/`: the scenarios replayed, and `manifest.json`: the AEMO sources and hashes.
+- **Private store:** `nem-monitor store put BUNDLE --store STORE` copies the bundle's AEMO files to `STORE/<id>/` (`manifest.json` and `bundle/`). Nothing an engine computes is stored: replays and counterfactuals run on users' own machines.
+- **Public library:** `nem-monitor library add STORE/<id> --out LIB` writes the record's public view into [nem-lens/library](https://github.com/nem-lens/library) (GitHub Pages): only what is directly derived from AEMO's published figures, for real events. Every file passes the schema's public gate (`event::check_public_file`) before anything is written.
 
-Only the headline fields are published from the replay; everything else the engine writes stays with the bundle.
+| Library file | Contents (AEMO source) |
+| --- | --- |
+| `index.json` | every event's headline, newest first |
+| `events/<id>/headline.json` | peak and mean price, intervals at or above $5,000, cost to load (price x demand), maximum demand, over the event span (DISPATCH PRICE, REGIONSUM) |
+| `events/<id>/series.json` | each region's price, demand, available generation and net interchange per interval |
+| `events/<id>/dispatch.json` | the event region's dispatch by fuel (UNIT_SOLUTION, GENUNITS) |
+| `events/<id>/interconnectors.json` | flows, limits and the constraints that set them (INTERCONNECTORRES) |
+| `events/<id>/constraints.json` | binding constraints with marginal values and descriptions (DISPATCH CONSTRAINT, GENCONDATA) |
+| `events/<id>/unavailability.json` | scheduled units on outage or derated, with rebid explanations (UNIT_SOLUTION, BIDDAYOFFER) |
+| `events/<id>/notices.json` | market notices around the event (Market_Notice) |
+| `events/<id>/manifest.json` | the AEMO source files and their SHA-256 |
+
+The span is intervals ending from the event's start to its end, in its region.
 
 ## Triggers (running the rest of the pipeline)
 
@@ -103,7 +116,7 @@ command = ["/opt/nem-lens/publish-event.sh", "{bundle}"]
 timeout_secs = 3600
 ```
 
-Commands run directly (no shell). The notification JSON is on stdin; `NEM_EVENT_ID`, `NEM_REGION`, `NEM_TRANSITION`, `NEM_DATA_TIER`, `NEM_TRADING_DAY`, `NEM_SEVERITY`, `NEM_EVENT_START`, `NEM_EVENT_END` and `NEM_BUNDLE` are set; placeholders `{event_id}` `{region}` `{transition}` `{data_tier}` `{trading_day}` `{severity}` `{start}` `{end}` `{bundle}` are substituted in argv. At `data_ready` the event's bundle is complete (next-day data, and MMSDM equations when `store.mmsdm_dir` is set) before triggers run, so the replay engine can read it. `deploy/publish-event.sh` runs `nemcf replay --bundle {bundle} --scenario DIR --out {bundle}/replay --save-snapshots {bundle}/replay/snapshots.json` (the baseline and every scenario in the folder, about 30 s for 12 Oct), then `nem-monitor library add` and a push of the library clone. A trigger can instead POST to an internal `webhook` signed with the secret in `secret_env`. Runs are logged; set `NEM_ADMIN_TOKEN` to read them at `GET /api/admin/runs`.
+Commands run directly (no shell). The notification JSON is on stdin; `NEM_EVENT_ID`, `NEM_REGION`, `NEM_TRANSITION`, `NEM_DATA_TIER`, `NEM_TRADING_DAY`, `NEM_SEVERITY`, `NEM_EVENT_START`, `NEM_EVENT_END` and `NEM_BUNDLE` are set; placeholders `{event_id}` `{region}` `{transition}` `{data_tier}` `{trading_day}` `{severity}` `{start}` `{end}` `{bundle}` are substituted in argv. At `data_ready` the event's bundle is complete (next-day data, and MMSDM tables when `store.mmsdm_dir` is set) before triggers run. `deploy/publish-event.sh` adds market notices, puts the record in the private store, writes the public view to the library, and pushes both clones. It does not run the engine. A trigger can instead POST to an internal `webhook` signed with the secret in `secret_env`. Runs are logged; set `NEM_ADMIN_TOKEN` to read them at `GET /api/admin/runs`.
 
 ## Public subscriptions
 

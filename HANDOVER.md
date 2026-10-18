@@ -124,7 +124,7 @@ See `docs/distribution-channels.md` for the comparison.
    - **Accept when:** a fixture replay posts exactly three messages per event per channel, threaded, with the chart image.
 
 ### P4. Pipeline integration
-Wire `closed` and `data_ready` triggers to the replay engine (`nemcf replay`) and `nem-report` once those exist. See the plan doc sections "Event report module", "Full-stack architecture" and "Monitor service".
+Wire `closed` and `data_ready` triggers to the publish pipeline (`deploy/publish-event.sh`: private store, then public library). Since 19 Oct 2026 the engine and nem-report do not run here; counterfactuals are computed on users' machines (cf-report).
 
 ## 6. Conventions
 
