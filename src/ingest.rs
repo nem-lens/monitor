@@ -390,7 +390,7 @@ pub async fn poll_once(app: &App) -> Result<usize> {
 }
 
 /// Poll ticks to skip after `failures` consecutive errors: 1, 2, 4, 8, then 15
-/// (about five minutes at the default 20 s poll).
+/// (about 15 minutes at the default 60 s poll).
 pub fn backoff_ticks(failures: u32) -> u32 {
     match failures {
         0 => 0,

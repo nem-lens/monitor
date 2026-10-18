@@ -1,6 +1,6 @@
 # nem-monitor
 
-An always-on event detector for Australia's National Electricity Market. It polls AEMO's NEMWeb every 20 seconds, detects price events as they happen, fires operator triggers to run the rest of the pipeline (replay, counterfactuals, media brief), and publishes a public site that anyone can subscribe to.
+An always-on event detector for Australia's National Electricity Market. It polls AEMO's NEMWeb every minute, detects price events as they happen, fires operator triggers to run the rest of the pipeline (replay, counterfactuals, media brief), and publishes a public site that anyone can subscribe to.
 
 Single Rust binary, SQLite storage, no other services required.
 
@@ -65,7 +65,7 @@ nem-monitor serve --replay fixtures/2026-10-12-synthetic --replay-delay-ms 300
 4. Put `deploy/Caddyfile` in front for automatic HTTPS (it disables buffering on the live stream).
 5. Point an external uptime check at `/healthz` (returns 503 if NEMWeb has not been reached for 10 minutes, or no new interval has arrived for 15).
 
-Resource use is small: one HTTP request every 20 s, one ~20 KB zip every 5 minutes, a 48-hour buffer (about 12 MB of raw zips) and a few MB of Parquet per confirmed event.
+Resource use is small: one HTTP request a minute, one ~20 KB zip every 5 minutes, a 48-hour buffer (about 12 MB of raw zips) and a few MB of Parquet per confirmed event.
 
 Without a server, `.github/workflows/pages.yml` runs `nem-monitor once` every five minutes on GitHub Actions and publishes a static site to Pages, with alerts as GitHub Discussions; see [docs/github-pages.md](docs/github-pages.md).
 

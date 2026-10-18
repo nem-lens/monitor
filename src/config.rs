@@ -57,7 +57,7 @@ impl Default for SourceCfg {
         Self {
             base_url: "https://nemweb.com.au/Reports/Current".into(),
             dispatch_dir: "DispatchIS_Reports".into(),
-            poll_secs: 20,
+            poll_secs: 60,
             backfill_hours: 6,
             user_agent: concat!("nem-monitor/", env!("CARGO_PKG_VERSION")).into(),
             data_ready_poll_secs: 600,
