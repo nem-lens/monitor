@@ -1122,6 +1122,7 @@ dependencies = [
  "csv",
  "regex",
  "serde",
+ "serde_json",
  "zip",
 ]
 
