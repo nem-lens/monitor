@@ -148,6 +148,9 @@ pub struct StaticData {
     /// Invoked versions with no GENCONDATA row in the months searched.
     pub missing_equations: Vec<ConstraintVersion>,
     pub dudetail_month: Option<String>,
+    /// Month whose INTERCONNECTORCONSTRAINT history was sliced.
+    #[serde(default)]
+    pub interconnector_month: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -518,6 +521,11 @@ pub const STATIC_TABLES: [(&str, &str, &str); 4] = [
         "static_spdregionconstraint.parquet",
     ),
 ];
+const INTERCONNECTOR: (&str, &str, &str) = (
+    "MARKET_CONFIG_INTERCONNECTORCONSTRAINT",
+    "INTERCONNECTORCONSTRAINT",
+    "static_interconnectorconstraint.parquet",
+);
 const DUDETAIL: (&str, &str, &str) = (
     "PARTICIPANT_REGISTRATION_DUDETAILSUMMARY",
     "DUDETAILSUMMARY",
@@ -703,20 +711,45 @@ pub fn add_static(dir: &Path, mmsdm: &Path) -> Result<Manifest> {
         }
     }
 
-    // Unit details: the file is a full history with START_DATE..END_DATE, so
-    // take the newest month at or before the window and keep rows in force.
+    // Unit details and interconnector limits: each month's file is a full
+    // history, so take the newest month at or before the window.
+    let latest = |folder: &str| {
+        month_dirs(mmsdm)
+            .into_iter()
+            .filter(|n| *n <= month_dir(window_start))
+            .rev()
+            .find(|mo| !mmsdm_files(mmsdm, mo, folder).is_empty())
+    };
+
+    // Every version effective by the window end, for the bundle's
+    // interconnectors: nemcf restores an interconnector's nominal limit when
+    // the constraint that set it is modelled.
+    let ics = interconnector_ids(dir)?;
+    let (ic_key, ic_folder, _) = INTERCONNECTOR;
+    let interconnector_month = latest(ic_folder);
+    if let Some(month) = &interconnector_month {
+        for path in mmsdm_files(mmsdm, month, ic_folder) {
+            let (bytes, tables) = read_mmsdm(&path, |r| {
+                r.text("EFFECTIVEDATE")
+                    .and_then(parse_market)
+                    .is_some_and(|e| e <= window_end)
+                    && ics.as_ref().is_none_or(|s| {
+                        r.text("INTERCONNECTORID")
+                            .is_some_and(|i| s.contains(i.trim()))
+                    })
+            })?;
+            if let Some(t) = tables.get(ic_key) {
+                bufs.entry(ic_key).or_default().add(t);
+            }
+            record_source(&mut m, &path, &bytes, month);
+        }
+    }
+
+    // Unit details: rows in force at the window start.
     let units = unit_ids(dir)?;
     let (key, folder, file) = DUDETAIL;
     let mut dudetail_month = None;
-    let candidates: Vec<String> = month_dirs(mmsdm)
-        .into_iter()
-        .filter(|n| *n <= month_dir(window_start))
-        .collect();
-    if let Some(month) = candidates
-        .iter()
-        .rev()
-        .find(|mo| !mmsdm_files(mmsdm, mo, folder).is_empty())
-    {
+    if let Some(month) = latest(folder).as_ref() {
         for path in mmsdm_files(mmsdm, month, folder) {
             let (bytes, tables) = read_mmsdm(&path, |r| {
                 let in_force = r
@@ -739,7 +772,11 @@ pub fn add_static(dir: &Path, mmsdm: &Path) -> Result<Manifest> {
         dudetail_month = Some(month.clone());
     }
 
-    for (key, _, file) in STATIC_TABLES.iter().copied().chain([(key, folder, file)]) {
+    for (key, _, file) in STATIC_TABLES
+        .iter()
+        .copied()
+        .chain([INTERCONNECTOR, (key, folder, file)])
+    {
         if let Some(buf) = bufs.remove(key) {
             let sha = buf.write_parquet(&dir.join(file))?;
             m.outputs.retain(|o| o.file != file);
@@ -769,6 +806,7 @@ pub fn add_static(dir: &Path, mmsdm: &Path) -> Result<Manifest> {
             .collect(),
         missing_equations: missing,
         dudetail_month,
+        interconnector_month,
     });
     m.updated_at = now_iso();
     m.save(dir)?;
@@ -793,13 +831,25 @@ fn record_source(m: &mut Manifest, path: &Path, bytes: &[u8], month: &str) {
 
 /// DUIDs in unit_dispatch.parquet, if the bundle has next-day data.
 fn unit_ids(dir: &Path) -> Result<Option<BTreeSet<String>>> {
-    let path = dir.join("unit_dispatch.parquet");
+    ids_in(&dir.join("unit_dispatch.parquet"), "DUID")
+}
+
+/// Interconnectors in dispatch_interconnectorres.parquet, if present.
+fn interconnector_ids(dir: &Path) -> Result<Option<BTreeSet<String>>> {
+    ids_in(
+        &dir.join("dispatch_interconnectorres.parquet"),
+        "INTERCONNECTORID",
+    )
+}
+
+/// The distinct values of a text column, or `None` if the file is absent.
+fn ids_in(path: &Path, col: &str) -> Result<Option<BTreeSet<String>>> {
     if !path.exists() {
         return Ok(None);
     }
     let mut out = BTreeSet::new();
-    for b in read_batches(&path)? {
-        if let Some(d) = column::<StringArray>(&b, "DUID") {
+    for b in read_batches(path)? {
+        if let Some(d) = column::<StringArray>(&b, col) {
             for i in 0..b.num_rows() {
                 if !d.is_null(i) {
                     out.insert(d.value(i).to_string());
@@ -1089,6 +1139,15 @@ mod tests {
             "SPDCONNECTIONPOINTCONSTRAINT",
             "I,SPDCPC,,2,CONNECTIONPOINTID,EFFECTIVEDATE,VERSIONNO,GENCONID,FACTOR,BIDTYPE\n\
              D,SPDCPC,,2,NBAY1,\"2012/07/02 00:00:00\",2,C,1,ENERGY\n",
+        );
+        // A full history each month; the version effective after the window
+        // is left out.
+        write(
+            "2026_09",
+            "INTERCONNECTORCONSTRAINT",
+            "I,MARKET_CONFIG,INTERCONNECTORCONSTRAINT,1,EFFECTIVEDATE,VERSIONNO,INTERCONNECTORID,IMPORTLIMIT,EXPORTLIMIT\n\
+             D,MARKET_CONFIG,INTERCONNECTORCONSTRAINT,1,\"1998/08/28 00:00:00\",1,V-SN,2124,1724\n\
+             D,MARKET_CONFIG,INTERCONNECTORCONSTRAINT,1,\"2026/11/01 00:00:00\",1,V-SN,2200,1800\n",
         );
         // After the window: not searched.
         write(
