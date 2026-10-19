@@ -180,6 +180,14 @@ enum LibraryCmd {
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
     },
+    /// Republish every record in the private store into the library and
+    /// rebuild its indexes.
+    Rebuild {
+        #[arg(long, value_name = "DIR")]
+        store: PathBuf,
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -390,6 +398,16 @@ async fn main() -> Result<()> {
         } => {
             let dir = record::put(&bundle, &store)?;
             println!("stored {}", dir.display());
+            Ok(())
+        }
+        Cmd::Library {
+            cmd: LibraryCmd::Rebuild { store, out },
+        } => {
+            let (n, failed) = library::rebuild(&store, &out)?;
+            println!("published {n} events");
+            for f in &failed {
+                println!("  failed: {f}");
+            }
             Ok(())
         }
         Cmd::Library {

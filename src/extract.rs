@@ -13,11 +13,13 @@ use anyhow::{Context, Result};
 use arrow_array::{
     Array, Float64Array, Int64Array, RecordBatch, StringArray, TimestampMillisecondArray,
 };
+use chrono::Datelike;
 use chrono::{Duration, NaiveDateTime};
 use nem_lens_aemo::event::{
-    fuel_of, interconnector_ends, is_outage_description, ConstraintSeries, Constraints, Dispatch,
-    Headline, InterconnectorSeries, Interconnectors, Notice, Notices, Rebid, RegionSeries, Series,
-    Unavailability, UnitAvailability, SCHEMA,
+    five_minute_settlement, fuel_of, interconnector_ends, is_outage_description, market_price_cap,
+    season, ConstraintSeries, Constraints, Dispatch, Headline, InterconnectorSeries,
+    Interconnectors, Notice, Notices, Rebid, RegionSeries, Series, Unavailability,
+    UnitAvailability, SCHEMA,
 };
 use nem_lens_aemo::time::{iso_market, trading_day};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -382,6 +384,91 @@ pub fn build(dir: &Path) -> Result<PublicFiles> {
     if count == 0 {
         anyhow::bail!("no {} prices in the event span", m.region);
     }
+    // Tags: AEMO data only (see nem_lens_aemo::event::TAG_KEYS).
+    let cap = market_price_cap(start);
+    let span_prices: Vec<f64> = span.iter().filter_map(|&i| ev.price[i]).collect();
+    let mut tags = vec![
+        format!("year:{}", start.year()),
+        format!("season:{}", season(start.month())),
+        format!("region:{}", m.region),
+        format!(
+            "severity:{}",
+            if peak.0 >= 0.95 * cap {
+                "cap"
+            } else if peak.0 >= 10_000.0 {
+                "extreme"
+            } else {
+                "high"
+            }
+        ),
+    ];
+    if peak.0 >= cap - 0.5 {
+        tags.push("price:at-cap".into());
+    }
+    if span_prices.iter().any(|p| *p < 0.0) {
+        tags.push("price:negative".into());
+    }
+    if span_prices.iter().any(|p| *p <= -999.5) {
+        tags.push("price:floor".into());
+    }
+    let (mut apc, mut suspended, mut intervention) = (false, false, false);
+    let (mut mpc, mut mpf) = (false, false);
+    for r in &price.rows {
+        let (Some(t), Some(reg)) = (
+            price.get(r, "SETTLEMENTDATE").t(),
+            price.get(r, "REGIONID").s(),
+        ) else {
+            continue;
+        };
+        if price.get(r, "INTERVENTION").f().is_some_and(|x| x != 0.0)
+            && window_start <= t
+            && t <= window_end
+        {
+            intervention = true;
+        }
+        if reg == m.region && start <= t && t <= end {
+            // APCFLAG is a bitmask: 1 = administered price cap applied,
+            // 4 = price capped at the market price cap, 8 = price at the
+            // floor. Other bits (16 is common in June 2022) are not
+            // tagged until their meaning is confirmed.
+            let flag = price.get(r, "APCFLAG").f().unwrap_or(0.0) as i64;
+            apc |= flag & 1 != 0;
+            mpc |= flag & 4 != 0;
+            mpf |= flag & 8 != 0;
+            suspended |= price
+                .get(r, "MARKETSUSPENDEDFLAG")
+                .f()
+                .is_some_and(|x| x != 0.0);
+        }
+    }
+    if mpc && !tags.iter().any(|t| t == "price:at-cap") {
+        tags.push("price:at-cap".into());
+    }
+    if mpf && !tags.iter().any(|t| t == "price:floor") {
+        tags.push("price:floor".into());
+    }
+    if apc {
+        tags.push("pricing:administered".into());
+    }
+    if suspended {
+        tags.push("pricing:suspended".into());
+    }
+    if intervention {
+        tags.push("intervention:yes".into());
+    }
+    tags.push(
+        if five_minute_settlement(start) {
+            "settlement:5-minute"
+        } else {
+            "settlement:30-minute"
+        }
+        .into(),
+    );
+    if !tdir.join("bids_dayoffer.parquet").exists() {
+        tags.push("bids:missing".into());
+    } else if !tdir.join("bids_offerperiod.parquet").exists() {
+        tags.push("bids:no-band-availability".into());
+    }
     let headline = Headline {
         schema: SCHEMA,
         event_id: m.event_id.clone(),
@@ -396,6 +483,7 @@ pub fn build(dir: &Path) -> Result<PublicFiles> {
         intervals_above_5000: above,
         cost_to_load: round(cost, 0),
         max_demand_mw: round(max_demand, 1),
+        tags,
         baseline_mean_price: None,
         scenarios: None,
     };

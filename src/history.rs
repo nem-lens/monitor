@@ -15,7 +15,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use chrono::{Datelike, NaiveDate, NaiveDateTime};
+use chrono::{NaiveDate, NaiveDateTime};
 use nem_lens_aemo::event::Notice;
 use nem_lens_aemo::files::visit_csvs;
 
@@ -32,28 +32,7 @@ use crate::detect::Detector;
 use crate::extract::{FetchedNotice, NOTICES_FILE};
 use crate::model::{Event, EventKind, TransitionKind};
 
-/// The market price cap ($/MWh) in force at an interval, by financial year
-/// (AEMC Schedule of Reliability Settings). Intervals end in market time;
-/// a financial year starts with the interval ending 1 July 00:05.
-pub fn market_price_cap(t: NaiveDateTime) -> f64 {
-    let t = t - chrono::Duration::minutes(5);
-    let fy = if t.month() >= 7 {
-        t.year()
-    } else {
-        t.year() - 1
-    };
-    match fy {
-        ..=2018 => 14_500.0,
-        2019 => 14_700.0,
-        2020 => 15_000.0,
-        2021 => 15_100.0,
-        2022 => 15_500.0,
-        2023 => 16_600.0,
-        2024 => 17_500.0,
-        2025 => 20_300.0,
-        _ => 23_200.0,
-    }
-}
+pub use nem_lens_aemo::event::market_price_cap;
 
 /// A closed historical event with what the archive says about how its
 /// prices were set.
@@ -63,7 +42,7 @@ pub struct HistoricalEvent {
     /// Market price cap in force at the event's start, $/MWh.
     pub market_price_cap: f64,
     /// Intervals in the event (start to end, its region) with the
-    /// administered price cap applied (APCFLAG = 1).
+    /// administered price cap applied (APCFLAG bit 1).
     pub apc_intervals: u32,
     /// Intervals in the event with the market suspended (MARKETSUSPENDEDFLAG = 1).
     pub suspended_intervals: u32,
@@ -158,7 +137,8 @@ fn read_month(
                     ..Default::default()
                 },
             );
-            let apc = r.num("APCFLAG").is_some_and(|x| x != 0.0);
+            // APCFLAG bit 1: administered price cap applied.
+            let apc = r.num("APCFLAG").is_some_and(|x| (x as i64) & 1 != 0);
             let susp = r.num("MARKETSUSPENDEDFLAG").is_some_and(|x| x != 0.0);
             if apc || susp {
                 flags.insert((t, region.to_string()), (apc, susp));
@@ -568,19 +548,6 @@ pub fn build_bundles(root: &Path, events: &[Event], bundles: &Path) -> Result<Ve
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn t(s: &str) -> NaiveDateTime {
-        parse_market(s).unwrap()
-    }
-
-    #[test]
-    fn the_cap_follows_the_financial_year() {
-        assert_eq!(market_price_cap(t("2020/06/30 23:55:00")), 14_700.0);
-        assert_eq!(market_price_cap(t("2020/07/01 00:00:00")), 14_700.0);
-        assert_eq!(market_price_cap(t("2020/07/01 00:05:00")), 15_000.0);
-        assert_eq!(market_price_cap(t("2022/06/13 12:00:00")), 15_100.0);
-        assert_eq!(market_price_cap(t("2026/10/12 14:20:00")), 23_200.0);
-    }
 
     #[test]
     fn months_are_inclusive() {

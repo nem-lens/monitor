@@ -87,8 +87,34 @@ fn safe_id(id: &str) -> Result<&str> {
 
 /// Publish the event in `dir` (a bundle, or a record in the private store)
 /// into the library at `lib`, replacing any earlier entry for it, and
-/// rebuild the index.
+/// rebuild the indexes.
 pub fn add(dir: &Path, lib: &Path) -> Result<Headline> {
+    let h = add_event(dir, lib)?;
+    write_index(lib)?;
+    Ok(h)
+}
+
+/// Publish every record in the private store at `store`, then rebuild the
+/// indexes once. Records that fail are reported and skipped.
+pub fn rebuild(store: &Path, lib: &Path) -> Result<(usize, Vec<String>)> {
+    let mut dirs: Vec<_> = fs::read_dir(store)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.join(bundle::MANIFEST).is_file())
+        .collect();
+    dirs.sort();
+    let (mut ok, mut failed) = (0, Vec::new());
+    for d in &dirs {
+        match add_event(d, lib) {
+            Ok(_) => ok += 1,
+            Err(e) => failed.push(format!("{}: {e:#}", d.display())),
+        }
+    }
+    write_index(lib)?;
+    Ok((ok, failed))
+}
+
+/// Write one event's public files, without touching the indexes.
+fn add_event(dir: &Path, lib: &Path) -> Result<Headline> {
     let m = Manifest::load(dir)?;
     let id = safe_id(&m.event_id)?.to_string();
     let files = extract::build(dir)?;
@@ -108,11 +134,11 @@ pub fn add(dir: &Path, lib: &Path) -> Result<Headline> {
             .with_context(|| format!("writing {}", target.join(name).display()))?;
     }
     fs::write(lib.join("README.md"), README)?;
-    write_index(lib)?;
     Ok(files.headline.public_view())
 }
 
-/// Rebuild index.json from every events/<id>/headline.json, newest first.
+/// Rebuild index.json from every events/<id>/headline.json, newest first,
+/// and years/<YYYY>.json with each year's events.
 pub fn write_index(lib: &Path) -> Result<Index> {
     let mut events = Vec::new();
     let root = lib.join("events");
@@ -132,10 +158,36 @@ pub fn write_index(lib: &Path) -> Result<Index> {
         schema: SCHEMA,
         events,
     };
-    let mut text = serde_json::to_vec_pretty(&index)?;
-    text.push(b'\n');
-    check_public_file("headline.json", &text).context("index")?;
-    fs::write(lib.join("index.json"), text)?;
+    let write = |path: &Path, idx: &Index| -> Result<()> {
+        let mut text = serde_json::to_vec_pretty(idx)?;
+        text.push(b'\n');
+        // The index holds headlines only: the headline gate applies.
+        check_public_file("headline.json", &text).context("index")?;
+        fs::write(path, text)?;
+        Ok(())
+    };
+    write(&lib.join("index.json"), &index)?;
+    let years = lib.join("years");
+    if years.exists() {
+        fs::remove_dir_all(&years)?;
+    }
+    fs::create_dir_all(&years)?;
+    let mut by_year: std::collections::BTreeMap<String, Vec<Headline>> = Default::default();
+    for e in &index.events {
+        by_year
+            .entry(e.start.get(..4).unwrap_or("unknown").to_string())
+            .or_default()
+            .push(e.clone());
+    }
+    for (y, events) in by_year {
+        write(
+            &years.join(format!("{y}.json")),
+            &Index {
+                schema: SCHEMA,
+                events,
+            },
+        )?;
+    }
     Ok(index)
 }
 
@@ -158,6 +210,7 @@ mod tests {
             intervals_above_5000: 0,
             cost_to_load: 1.0,
             max_demand_mw: 1.0,
+            tags: vec!["year:2026".into()],
             baseline_mean_price: Some(9.0),
             scenarios: None,
         }
@@ -185,6 +238,7 @@ mod tests {
         // A private field in a stored headline never reaches the index.
         let text = fs::read_to_string(lib.join("index.json")).unwrap();
         assert!(!text.contains("baseline_mean_price"));
+        assert!(lib.join("years").join("2026.json").exists());
         fs::remove_dir_all(&lib).unwrap();
     }
 
