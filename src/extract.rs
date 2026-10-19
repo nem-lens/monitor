@@ -495,8 +495,9 @@ pub fn build(dir: &Path) -> Result<PublicFiles> {
     let mut fuels_mw: BTreeMap<String, Vec<f64>> = BTreeMap::new();
     let mut avail: BTreeMap<String, Vec<Option<f64>>> = BTreeMap::new();
     // The archive repeats some intervals' rows (re-published versions):
-    // keep each unit's latest row per interval (LASTCHANGED).
-    let mut latest: HashMap<(NaiveDateTime, &str), &Vec<V>> = HashMap::new();
+    // keep each unit's latest row per interval (LASTCHANGED). Ordered, so
+    // the fuel sums below add up the same way every run.
+    let mut latest: BTreeMap<(NaiveDateTime, &str), &Vec<V>> = BTreeMap::new();
     for r in ud.pricing() {
         let (Some(t), Some(duid)) = (ud.get(r, "SETTLEMENTDATE").t(), ud.get(r, "DUID").s()) else {
             continue;

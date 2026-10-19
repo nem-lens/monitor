@@ -10,6 +10,7 @@ repository = "https://github.com/nem-lens/monitor"
 anyhow = "1"
 arrow-array = "60.0.0"
 arrow-schema = "60.0.0"
+arrow-select = "60.0.0"
 axum = { version = "0.8", features = ["macros"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }

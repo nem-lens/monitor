@@ -52,7 +52,26 @@ pub fn put(bundle: &Path, store: &Path) -> Result<PathBuf> {
         }
     }
     fs::copy(bundle.join(MANIFEST), dir.join(MANIFEST))?;
+    crate::slim::slim(&dir)?;
     Ok(dir)
+}
+
+/// Event ids of the records in the store, sorted.
+pub fn ids(store: &Path) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for e in fs::read_dir(store).with_context(|| format!("reading {}", store.display()))? {
+        let p = e?.path();
+        if p.join(MANIFEST).is_file() {
+            out.push(
+                p.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string(),
+            );
+        }
+    }
+    out.sort();
+    Ok(out)
 }
 
 #[cfg(test)]

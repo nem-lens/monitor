@@ -176,6 +176,9 @@ pub struct Manifest {
     /// MMSDM equations and unit details, added by `bundle add-static`.
     #[serde(default)]
     pub static_data: Option<StaticData>,
+    /// Rows dropped as no reader can use them, by `store slim`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slimmed: Option<crate::slim::Slimmed>,
 }
 
 impl Manifest {
@@ -356,6 +359,7 @@ pub(crate) fn base_manifest(ev: &Event, w: Window) -> Manifest {
         },
         notes: String::new(),
         static_data: None,
+        slimmed: None,
     }
 }
 

@@ -25,6 +25,7 @@ mod nemweb;
 mod notify;
 mod record;
 mod site;
+mod slim;
 mod store;
 mod time;
 mod triggers;
@@ -34,7 +35,7 @@ mod webhooks;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -198,6 +199,13 @@ enum StoreCmd {
         /// The store directory (a checkout of nem-lens/events).
         #[arg(long, value_name = "DIR")]
         store: PathBuf,
+    },
+    /// Drop the rows no reader can use from records already in the store
+    /// (all of them, or the events named).
+    Slim {
+        #[arg(long, value_name = "DIR")]
+        store: PathBuf,
+        ids: Vec<String>,
     },
 }
 
@@ -398,6 +406,24 @@ async fn main() -> Result<()> {
         } => {
             let dir = record::put(&bundle, &store)?;
             println!("stored {}", dir.display());
+            Ok(())
+        }
+        Cmd::Store {
+            cmd: StoreCmd::Slim { store, ids },
+        } => {
+            let ids = if ids.is_empty() {
+                record::ids(&store)?
+            } else {
+                ids
+            };
+            for id in &ids {
+                let s = slim::slim(&store.join(id)).with_context(|| format!("slimming {id}"))?;
+                let (before, after) = s
+                    .tables
+                    .iter()
+                    .fold((0, 0), |(b, a), t| (b + t.rows_before, a + t.rows_after));
+                println!("{id}: {before} -> {after} rows");
+            }
             Ok(())
         }
         Cmd::Library {

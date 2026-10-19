@@ -1133,6 +1133,7 @@ dependencies = [
  "anyhow",
  "arrow-array",
  "arrow-schema",
+ "arrow-select",
  "axum",
  "chrono",
  "clap",
