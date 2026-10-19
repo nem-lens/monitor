@@ -412,7 +412,6 @@ pub fn build(dir: &Path) -> Result<PublicFiles> {
         tags.push("price:floor".into());
     }
     let (mut apc, mut suspended, mut intervention) = (false, false, false);
-    let (mut mpc, mut mpf) = (false, false);
     for r in &price.rows {
         let (Some(t), Some(reg)) = (
             price.get(r, "SETTLEMENTDATE").t(),
@@ -426,26 +425,20 @@ pub fn build(dir: &Path) -> Result<PublicFiles> {
         {
             intervention = true;
         }
-        if reg == m.region && start <= t && t <= end {
-            // APCFLAG is a bitmask: 1 = administered price cap applied,
-            // 4 = price capped at the market price cap, 8 = price at the
-            // floor. Other bits (16 is common in June 2022) are not
+        let pricing_run = price.get(r, "INTERVENTION").f().is_none_or(|x| x == 0.0);
+        if pricing_run && reg == m.region && start <= t && t <= end {
+            // APCFLAG is a bitmask; bit 1 is the administered price cap.
+            // Bit 4 marks the original price (ROP) at the market price cap
+            // even when RRP was scaled below it (flag 20 on 31 Jan 2020),
+            // so price tags come from RRP instead. Bits 4 and 16 are not
             // tagged until their meaning is confirmed.
             let flag = price.get(r, "APCFLAG").f().unwrap_or(0.0) as i64;
             apc |= flag & 1 != 0;
-            mpc |= flag & 4 != 0;
-            mpf |= flag & 8 != 0;
             suspended |= price
                 .get(r, "MARKETSUSPENDEDFLAG")
                 .f()
                 .is_some_and(|x| x != 0.0);
         }
-    }
-    if mpc && !tags.iter().any(|t| t == "price:at-cap") {
-        tags.push("price:at-cap".into());
-    }
-    if mpf && !tags.iter().any(|t| t == "price:floor") {
-        tags.push("price:floor".into());
     }
     if apc {
         tags.push("pricing:administered".into());
