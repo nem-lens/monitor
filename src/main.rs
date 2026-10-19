@@ -17,6 +17,7 @@ mod config;
 mod detect;
 mod extract;
 mod feeds;
+mod history;
 mod ingest;
 mod library;
 mod model;
@@ -116,6 +117,55 @@ enum Cmd {
     },
     /// Validate the configuration and exit.
     CheckConfig,
+    /// Historical events from AEMO's MMSDM monthly archive.
+    History {
+        #[command(subcommand)]
+        cmd: HistoryCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum HistoryCmd {
+    /// Run the detector over archived months (DISPATCHPRICE and
+    /// DISPATCHREGIONSUM under ROOT/<YYYY_MM>/<TABLE>/) and write every
+    /// closed high-price event as JSON.
+    Scan {
+        #[arg(long, value_name = "DIR")]
+        root: PathBuf,
+        /// First and last month, YYYY_MM.
+        #[arg(long)]
+        from: String,
+        #[arg(long)]
+        to: String,
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+    },
+    /// Build bundles for scanned events from the archive, add MMSDM static
+    /// tables, put each record in the private store and publish its public
+    /// view to the library.
+    Build {
+        #[arg(long, value_name = "DIR")]
+        root: PathBuf,
+        /// Output of `history scan`.
+        #[arg(long, value_name = "FILE")]
+        events: PathBuf,
+        /// Only events starting in these months (YYYY_MM, comma separated).
+        #[arg(long, value_delimiter = ',')]
+        months: Vec<String>,
+        /// Only these event ids (comma separated).
+        #[arg(long, value_delimiter = ',')]
+        ids: Vec<String>,
+        /// Where bundles are built (scratch).
+        #[arg(long, value_name = "DIR")]
+        bundles: PathBuf,
+        /// MMSDM tree for add-static [default: ROOT].
+        #[arg(long, value_name = "DIR")]
+        mmsdm: Option<PathBuf>,
+        #[arg(long, value_name = "DIR")]
+        store: PathBuf,
+        #[arg(long, value_name = "DIR")]
+        library: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -358,6 +408,67 @@ async fn main() -> Result<()> {
                 h.intervals_above_5000,
                 h.cost_to_load / 1e6
             );
+            Ok(())
+        }
+        Cmd::History {
+            cmd:
+                HistoryCmd::Scan {
+                    root,
+                    from,
+                    to,
+                    out,
+                },
+        } => {
+            let months = history::months(&from, &to)?;
+            let (events, low) = history::scan(&root, &months, cfg.detect.clone())?;
+            std::fs::write(&out, serde_json::to_vec_pretty(&events)?)?;
+            println!(
+                "{} closed high-price events ({} low-price events not listed) in {} months; wrote {}",
+                events.len(),
+                low,
+                months.len(),
+                out.display()
+            );
+            Ok(())
+        }
+        Cmd::History {
+            cmd:
+                HistoryCmd::Build {
+                    root,
+                    events,
+                    months,
+                    ids,
+                    bundles,
+                    mmsdm,
+                    store,
+                    library: lib,
+                },
+        } => {
+            let all: Vec<history::HistoricalEvent> =
+                serde_json::from_slice(&std::fs::read(&events)?)?;
+            let chosen: Vec<model::Event> = all
+                .into_iter()
+                .map(|h| h.event)
+                .filter(|e| ids.is_empty() || ids.contains(&e.id))
+                .filter(|e| {
+                    months.is_empty()
+                        || months.iter().any(|m| {
+                            e.start.get(..7).map(|s| s.replace('-', "_")) == Some(m.clone())
+                        })
+                })
+                .collect();
+            println!("building {} events", chosen.len());
+            let dirs = history::build_bundles(&root, &chosen, &bundles)?;
+            let mmsdm = mmsdm.unwrap_or(root);
+            for dir in dirs {
+                bundle::add_static(&dir, &mmsdm)?;
+                let rec = record::put(&dir, &store)?;
+                let h = library::add(&rec, &lib)?;
+                println!(
+                    "{}: peak ${:.0} at {}, mean ${:.0}, {} intervals >= $5,000",
+                    h.event_id, h.peak_price, h.peak_at, h.mean_price, h.intervals_above_5000
+                );
+            }
             Ok(())
         }
         Cmd::Prune => {

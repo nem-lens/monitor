@@ -185,7 +185,7 @@ impl Manifest {
         Ok(serde_json::from_str(&text)?)
     }
 
-    fn save(&self, dir: &Path) -> Result<()> {
+    pub(crate) fn save(&self, dir: &Path) -> Result<()> {
         fs::write(dir.join(MANIFEST), serde_json::to_vec_pretty(self)?)?;
         Ok(())
     }
@@ -236,6 +236,11 @@ impl TableBuf {
 
     pub fn len(&self) -> usize {
         self.rows.len()
+    }
+
+    /// Whether any header has been seen (Parquet needs a schema).
+    pub fn has_columns(&self) -> bool {
+        !self.columns.is_empty()
     }
 
     fn values(&self, i: usize) -> impl Iterator<Item = Option<&str>> {
@@ -331,7 +336,7 @@ pub struct RawFile {
     pub bytes: Vec<u8>,
 }
 
-fn base_manifest(ev: &Event, w: Window) -> Manifest {
+pub(crate) fn base_manifest(ev: &Event, w: Window) -> Manifest {
     Manifest {
         format: 1,
         generator: concat!("nem-monitor ", env!("CARGO_PKG_VERSION")).into(),
@@ -791,7 +796,19 @@ pub fn add_static(dir: &Path, mmsdm: &Path) -> Result<Manifest> {
     // (GENUNITS). Both are full histories, so the newest month will do.
     let (al_key, al_folder, _) = DUALLOC;
     let (gu_key, gu_folder, _) = GENUNITS;
-    let fuel_month = latest(al_folder).filter(|mo| !mmsdm_files(mmsdm, mo, gu_folder).is_empty());
+    // DUALLOC is archived only from 2020_10. Its rows carry their
+    // effective dates, so for an earlier window the first archived month
+    // still gives the allocation in force at the window start.
+    let has_both = |mo: &String| {
+        !mmsdm_files(mmsdm, mo, al_folder).is_empty()
+            && !mmsdm_files(mmsdm, mo, gu_folder).is_empty()
+    };
+    let fuel_month = month_dirs(mmsdm)
+        .into_iter()
+        .filter(|mo| *mo <= month_dir(window_start))
+        .rev()
+        .find(has_both)
+        .or_else(|| month_dirs(mmsdm).into_iter().find(has_both));
     if let Some(month) = &fuel_month {
         let mut gensets: BTreeSet<String> = BTreeSet::new();
         for path in mmsdm_files(mmsdm, month, al_folder) {

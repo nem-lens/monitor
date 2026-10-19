@@ -75,6 +75,12 @@ impl Detector {
         serde_json::to_string(&self.state).expect("state serialises")
     }
 
+    /// Set the market price cap the `cap` severity is measured against
+    /// (it changes each financial year; historical scans follow it).
+    pub fn set_market_price_cap(&mut self, cap: f64) {
+        self.cfg.market_price_cap = cap;
+    }
+
     pub fn last_settlement(&self) -> Option<NaiveDateTime> {
         self.state.last_settlement
     }

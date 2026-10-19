@@ -275,6 +275,15 @@ fn unit_info(dir: &Path) -> Result<HashMap<String, UnitInfo>> {
 
 // ------------------------------------------------------------- build
 
+/// Interval ends in a bundle's price table (pricing run).
+pub fn price_intervals(dir: &Path) -> Result<BTreeSet<NaiveDateTime>> {
+    let price = Tbl::read(&tables_dir(dir).join("dispatch_price.parquet"))?;
+    Ok(price
+        .pricing()
+        .filter_map(|r| price.get(r, "SETTLEMENTDATE").t())
+        .collect())
+}
+
 fn round(x: f64, places: i32) -> f64 {
     let k = 10f64.powi(places);
     (x * k).round() / k
