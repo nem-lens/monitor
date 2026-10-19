@@ -16,6 +16,7 @@ mod bundle;
 mod config;
 mod detect;
 mod extract;
+mod facts;
 mod feeds;
 mod history;
 mod ingest;
@@ -188,6 +189,21 @@ enum LibraryCmd {
         store: PathBuf,
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
+    },
+    /// Print an event's fact sheet: the facts an account of it may use,
+    /// from its public library files only.
+    Facts {
+        /// The event's folder in the library (LIB/events/<id>).
+        event: PathBuf,
+    },
+    /// Check an account of an event against its fact sheet: every number,
+    /// time, unit and constraint in it must appear in the sheet. Exits
+    /// non-zero, listing them, if any does not.
+    CheckAccount {
+        /// The event's folder in the library (LIB/events/<id>).
+        event: PathBuf,
+        /// The account, as plain text.
+        account: PathBuf,
     },
 }
 
@@ -435,6 +451,29 @@ async fn main() -> Result<()> {
                 println!("  failed: {f}");
             }
             Ok(())
+        }
+        Cmd::Library {
+            cmd: LibraryCmd::Facts { event },
+        } => {
+            print!("{}", facts::build(&event)?);
+            Ok(())
+        }
+        Cmd::Library {
+            cmd: LibraryCmd::CheckAccount { event, account },
+        } => {
+            let sheet = facts::build(&event)?;
+            let text = std::fs::read_to_string(&account)
+                .with_context(|| format!("reading {}", account.display()))?;
+            let missing = facts::check(&sheet, &text);
+            if missing.is_empty() {
+                println!("ok: every figure and name is in the fact sheet");
+                Ok(())
+            } else {
+                for m in &missing {
+                    println!("not in the fact sheet: {m}");
+                }
+                anyhow::bail!("{} figures or names not in the fact sheet", missing.len())
+            }
         }
         Cmd::Library {
             cmd: LibraryCmd::Add { record, out },
