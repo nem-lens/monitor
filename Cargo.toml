@@ -3,7 +3,7 @@ name = "nem-monitor"
 version = "0.1.0"
 edition = "2021"
 description = "Always-on NEM event detector: polls AEMO NEMWeb, detects price events, fires triggers and publishes public feeds"
-license = "Apache-2.0"
+license = "BSD-3-Clause"
 repository = "https://github.com/nem-lens/monitor"
 
 [dependencies]
