@@ -494,10 +494,22 @@ pub fn build(dir: &Path) -> Result<PublicFiles> {
     let ud = Tbl::read(&tdir.join("unit_dispatch.parquet"))?;
     let mut fuels_mw: BTreeMap<String, Vec<f64>> = BTreeMap::new();
     let mut avail: BTreeMap<String, Vec<Option<f64>>> = BTreeMap::new();
+    // The archive repeats some intervals' rows (re-published versions):
+    // keep each unit's latest row per interval (LASTCHANGED).
+    let mut latest: HashMap<(NaiveDateTime, &str), &Vec<V>> = HashMap::new();
     for r in ud.pricing() {
         let (Some(t), Some(duid)) = (ud.get(r, "SETTLEMENTDATE").t(), ud.get(r, "DUID").s()) else {
             continue;
         };
+        let changed = |x: &Vec<V>| ud.get(x, "LASTCHANGED").t();
+        match latest.get(&(t, duid)) {
+            Some(prev) if changed(prev) >= changed(r) => {}
+            _ => {
+                latest.insert((t, duid), r);
+            }
+        }
+    }
+    for ((t, duid), r) in latest {
         let (Some(&i), Some(u)) = (idx.get(&t), info.get(duid)) else {
             continue;
         };
