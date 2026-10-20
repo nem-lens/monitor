@@ -649,7 +649,9 @@ pub fn build(dir: &Path) -> Result<PublicFiles> {
         }
     }
     let dc = Tbl::read(&tdir.join("dispatch_constraint.parquet"))?;
-    let mut cons: BTreeMap<String, Vec<Option<f64>>> = BTreeMap::new();
+    // Per constraint: (MARGINALVALUE, VIOLATIONDEGREE) per interval.
+    type PerInterval = Vec<Option<f64>>;
+    let mut cons: BTreeMap<String, (PerInterval, PerInterval)> = BTreeMap::new();
     for r in dc.pricing() {
         let (Some(t), Some(id)) = (
             dc.get(r, "SETTLEMENTDATE").t(),
@@ -658,15 +660,23 @@ pub fn build(dir: &Path) -> Result<PublicFiles> {
             continue;
         };
         if let Some(&i) = idx.get(&t) {
-            cons.entry(id.to_string()).or_insert_with(|| vec![None; n])[i] =
-                dc.get(r, "MARGINALVALUE").f();
+            let e = cons
+                .entry(id.to_string())
+                .or_insert_with(|| (vec![None; n], vec![None; n]));
+            e.0[i] = dc.get(r, "MARGINALVALUE").f();
+            e.1[i] = dc
+                .get(r, "VIOLATIONDEGREE")
+                .f()
+                .filter(|v| v.abs() > 1e-6)
+                .map(|v| round(v, 2));
         }
     }
     let mut constraints: Vec<ConstraintSeries> = cons
         .into_iter()
-        .filter_map(|(id, marginal)| {
+        .filter_map(|(id, (marginal, violation))| {
             let binding = marginal.iter().flatten().filter(|m| m.abs() > 1e-9).count() as u32;
-            (binding > 0).then(|| {
+            let violated = violation.iter().any(Option::is_some);
+            (binding > 0 || violated).then(|| {
                 let description = desc.get(&id).map(|d| d.1.clone()).unwrap_or_default();
                 ConstraintSeries {
                     outage: is_outage_description(&description),
@@ -674,6 +684,7 @@ pub fn build(dir: &Path) -> Result<PublicFiles> {
                     description,
                     marginal,
                     intervals_binding: binding,
+                    violation: if violated { violation } else { Vec::new() },
                 }
             })
         })

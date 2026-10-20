@@ -357,7 +357,63 @@ pub fn build(dir: &Path) -> Result<String> {
     }
 
     line(String::new());
-    line("## Binding network constraints in the span".into());
+    line(format!("## Units out or derated in {name}"));
+    let mut units: Vec<(f64, &_)> = unav
+        .units
+        .iter()
+        .filter(|u| u.region == region)
+        .map(|u| {
+            let avail = u.availability.get(peak).copied().flatten().unwrap_or(0.0);
+            ((u.capacity_mw - avail).max(0.0), u)
+        })
+        .filter(|(short, _)| *short >= 0.5)
+        .collect();
+    units.sort_by(|a, b| b.0.total_cmp(&a.0));
+    if units.is_empty() {
+        line(format!(
+            "None: no unit in {name} was out or derated at the peak."
+        ));
+    } else {
+        let total: f64 = units.iter().map(|(x, _)| x).sum();
+        line(format!(
+            "{} out or derated at the peak, {} short of capacity in total (capacity minus AEMO availability). The largest:",
+            count(units.len(), "unit"),
+            mw(total)
+        ));
+        for (short, u) in units.iter().take(MAX_UNITS) {
+            let avail = u.availability.get(peak).copied().flatten().unwrap_or(0.0);
+            let mut t = format!(
+                "- {} ({}, capacity {}): {}, {} available at the peak, {} short.",
+                u.duid,
+                u.fuel.as_deref().unwrap_or("fuel unknown"),
+                mw(u.capacity_mw),
+                if u.kind == "outage" { "out" } else { "derated" },
+                mw(avail),
+                mw(*short)
+            );
+            let mut reasons: Vec<String> = Vec::new();
+            for r in u.rebids.iter().rev() {
+                let q = quote(&r.explanation);
+                if !q.is_empty() && !reasons.contains(&q) {
+                    reasons.push(q);
+                }
+            }
+            reasons.truncate(2);
+            if !reasons.is_empty() {
+                let _ = write!(
+                    t,
+                    " Rebid reasons in force: \"{}\".",
+                    reasons.join("\"; \"")
+                );
+            }
+            line(t);
+        }
+        if units.len() > MAX_UNITS {
+            line(format!("({} more not listed.)", units.len() - MAX_UNITS));
+        }
+    }
+    line(String::new());
+    line("## Network constraints in the span".into());
     let mut bound: Vec<(usize, f64, bool, &_)> = cons
         .constraints
         .iter()
@@ -394,6 +450,57 @@ pub fn build(dir: &Path) -> Result<String> {
         .map(String::as_str)
         .collect();
     let letter = region.chars().next().unwrap_or('?');
+    // Constraints dispatch could not meet (AEMO VIOLATIONDEGREE), FCAS ones
+    // included: those named for the region or setting one of its
+    // interconnector limits. Single-unit ones are left out.
+    let mut violated: Vec<(usize, f64, Option<f64>, &_)> = cons
+        .constraints
+        .iter()
+        .filter(|c| !c.id.starts_with(['#', '$']))
+        .filter(|c| {
+            let id = c.id.as_str();
+            id.starts_with(letter)
+                || id.starts_with(&format!("F_{letter}"))
+                || id.starts_with(&format!("C_{letter}_"))
+                || setters.contains(id)
+        })
+        .filter_map(|c| {
+            let v = |i: usize| c.violation.get(i).copied().flatten();
+            let count = span.iter().filter(|&&i| v(i).is_some()).count();
+            let largest = span
+                .iter()
+                .filter_map(|&i| v(i))
+                .map(f64::abs)
+                .fold(0.0, f64::max);
+            // Under 1 (MW for most) is rounding-level, often Mvar limits on
+            // idle solar and wind farms.
+            (count > 0 && largest >= 1.0).then_some((count, largest, v(peak), c))
+        })
+        .collect();
+    violated.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.3.id.cmp(&b.3.id)));
+    if !violated.is_empty() {
+        line(format!(
+            "{} in or into {name} could not be met by AEMO's dispatch (violated) in the span. When dispatch cannot meet a constraint, its penalty can set regional prices, up to the market price cap:",
+            count(violated.len(), "constraint")
+        ));
+        for (k, largest, at_peak, c) in &violated {
+            let mut t = format!(
+                "- {}{}: violated in {k} of {n} intervals, by up to {}",
+                c.id,
+                if c.description.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!(" (\"{}\")", quote(&c.description))
+                },
+                mw(*largest)
+            );
+            if let Some(v) = at_peak {
+                let _ = write!(t, "; by {} at the peak", mw(v.abs()));
+            }
+            t.push('.');
+            line(t);
+        }
+    }
     let (mut k_fcas, mut single, mut elsewhere) = (0, 0, 0);
     bound.retain(|b| {
         let id = b.3.id.as_str();
@@ -468,68 +575,17 @@ pub fn build(dir: &Path) -> Result<String> {
 
     line(String::new());
     line(format!("## Interconnectors to and from {name}"));
+    let described: BTreeMap<&str, &str> = cons
+        .constraints
+        .iter()
+        .filter(|c| !c.description.trim().is_empty())
+        .map(|c| (c.id.as_str(), c.description.as_str()))
+        .collect();
     if touching.is_empty() {
         line(format!("None: {name} has no interconnector in the data."));
     }
     for ic in touching {
-        line(interconnector(ic, region, &span, peak, n));
-    }
-
-    line(String::new());
-    line(format!("## Units out or derated in {name}"));
-    let mut units: Vec<(f64, &_)> = unav
-        .units
-        .iter()
-        .filter(|u| u.region == region)
-        .map(|u| {
-            let avail = u.availability.get(peak).copied().flatten().unwrap_or(0.0);
-            ((u.capacity_mw - avail).max(0.0), u)
-        })
-        .filter(|(short, _)| *short >= 0.5)
-        .collect();
-    units.sort_by(|a, b| b.0.total_cmp(&a.0));
-    if units.is_empty() {
-        line(format!(
-            "None: no unit in {name} was out or derated at the peak."
-        ));
-    } else {
-        let total: f64 = units.iter().map(|(x, _)| x).sum();
-        line(format!(
-            "{} out or derated at the peak, {} short of capacity in total (capacity minus AEMO availability). The largest:",
-            count(units.len(), "unit"),
-            mw(total)
-        ));
-        for (short, u) in units.iter().take(MAX_UNITS) {
-            let avail = u.availability.get(peak).copied().flatten().unwrap_or(0.0);
-            let mut t = format!(
-                "- {} ({}, capacity {}): {}, {} available at the peak, {} short.",
-                u.duid,
-                u.fuel.as_deref().unwrap_or("fuel unknown"),
-                mw(u.capacity_mw),
-                if u.kind == "outage" { "out" } else { "derated" },
-                mw(avail),
-                mw(*short)
-            );
-            let mut reasons: Vec<String> = Vec::new();
-            for r in u.rebids.iter().rev() {
-                let q = quote(&r.explanation);
-                if !q.is_empty() && !reasons.contains(&q) {
-                    reasons.push(q);
-                }
-            }
-            reasons.truncate(2);
-            if !reasons.is_empty() {
-                let _ = write!(
-                    t,
-                    " Rebid reasons in force: \"{}\".",
-                    reasons.join("\"; \"")
-                );
-            }
-            line(t);
-        }
-        if units.len() > MAX_UNITS {
-            line(format!("({} more not listed.)", units.len() - MAX_UNITS));
-        }
+        line(interconnector(ic, region, &span, peak, n, &described));
     }
 
     line(String::new());
@@ -620,6 +676,7 @@ fn interconnector(
     span: &[usize],
     peak: usize,
     n: usize,
+    described: &BTreeMap<&str, &str>,
 ) -> String {
     let get = |v: &Vec<Option<f64>>, i: usize| v.get(i).copied().flatten();
     let (from, to) = (region_name(&ic.from_region), region_name(&ic.to_region));
@@ -637,24 +694,36 @@ fn interconnector(
         }
         None => t.push_str("no flow recorded at the peak."),
     }
-    // (intervals at the limit, constraint IDs that set it) per direction.
-    let mut forward = (0, BTreeMap::<&str, usize>::new());
-    let mut back = (0, BTreeMap::<&str, usize>::new());
+    // (intervals at or beyond the limit, constraint IDs that set it,
+    // intervals beyond it) per direction.
+    let mut forward = (0, BTreeMap::<&str, usize>::new(), 0);
+    let mut back = (0, BTreeMap::<&str, usize>::new(), 0);
     for &i in span {
         let Some(f) = get(&ic.flow, i) else { continue };
-        if get(&ic.export_limit, i).is_some_and(|l| f >= l - AT_LIMIT_MW) {
+        if let Some(l) = get(&ic.export_limit, i).filter(|l| f >= l - AT_LIMIT_MW) {
             forward.0 += 1;
+            forward.2 += usize::from(f > l + AT_LIMIT_MW);
             if let Some(Some(by)) = ic.export_set_by.get(i) {
                 *forward.1.entry(by.as_str()).or_default() += 1;
             }
         }
-        if get(&ic.import_limit, i).is_some_and(|l| f <= l + AT_LIMIT_MW) {
+        if let Some(l) = get(&ic.import_limit, i).filter(|l| f <= l + AT_LIMIT_MW) {
             back.0 += 1;
+            back.2 += usize::from(f < l - AT_LIMIT_MW);
             if let Some(Some(by)) = ic.import_set_by.get(i) {
                 *back.1.entry(by.as_str()).or_default() += 1;
             }
         }
     }
+    // How far the flow at the peak went past each direction's limit.
+    let past = [
+        get(&ic.flow, peak)
+            .zip(get(&ic.export_limit, peak))
+            .map(|(f, l)| f - l),
+        get(&ic.flow, peak)
+            .zip(get(&ic.import_limit, peak))
+            .map(|(f, l)| l - f),
+    ];
     // Each direction's limit at the peak, signed in that direction: AEMO's
     // import limit bounds the reverse flow, so it is negated. A limit below
     // zero forces flow the other way.
@@ -662,26 +731,41 @@ fn interconnector(
         get(&ic.export_limit, peak),
         get(&ic.import_limit, peak).map(|l| -l),
     ];
-    for (((count, by), (a, b)), limit) in [(forward, (from, to)), (back, (to, from))]
-        .into_iter()
-        .zip(limits)
+    for ((((count, by, beyond), (a, b)), limit), past) in
+        [(forward, (from, to)), (back, (to, from))]
+            .into_iter()
+            .zip(limits)
+            .zip(past)
     {
         if count == 0 {
             continue;
         }
-        let _ = write!(
-            t,
-            " At its limit for flow from {a} to {b} in {count} of {n} intervals"
-        );
+        if beyond > 0 {
+            let _ = write!(
+                t,
+                " At or beyond its limit for flow from {a} to {b} in {count} of {n} intervals, beyond it (the limit not met) in {beyond}"
+            );
+        } else {
+            let _ = write!(
+                t,
+                " At its limit for flow from {a} to {b} in {count} of {n} intervals"
+            );
+        }
         if let Some(l) = limit {
             let _ = write!(t, " (that limit was {} at the peak", mw(l));
             if l < 0.0 {
-                let _ = write!(t, ", below zero, forcing flow from {b} to {a}");
+                let _ = write!(t, ", below zero, requiring flow from {b} to {a}");
+            }
+            if let Some(p) = past.filter(|p| *p > AT_LIMIT_MW) {
+                let _ = write!(t, "; the flow was {} past it at the peak", mw(p));
             }
             t.push(')');
         }
         if let Some((id, _)) = by.iter().max_by_key(|(_, c)| **c) {
             let _ = write!(t, ", limit mostly set by {id}");
+            if let Some(d) = described.get(id) {
+                let _ = write!(t, " (\"{}\")", quote(d));
+            }
         }
         t.push('.');
     }
@@ -815,5 +899,31 @@ mod tests {
         assert_eq!(check(sheet, "It fell to $1,000/MWh."), ["number 1000"]);
         assert_eq!(whole(-1234.4), "-1,234");
         assert_eq!(whole(999.5), "1,000");
+    }
+
+    #[test]
+    fn a_flow_past_its_limit_is_called_so() {
+        // 16 Nov 2020: the Victoria-to-NSW limit required 447 MW to flow
+        // into Victoria; 232 MW did.
+        let ic = InterconnectorSeries {
+            id: "VIC1-NSW1".into(),
+            from_region: "VIC1".into(),
+            to_region: "NSW1".into(),
+            flow: vec![Some(-232.0)],
+            import_limit: vec![Some(-1214.7)],
+            export_limit: vec![Some(-446.9)],
+            import_set_by: vec![None],
+            export_set_by: vec![Some("N::N_CNSD_2".into())],
+        };
+        let described = BTreeMap::from([("N::N_CNSD_2", "Out = Canberra - Stockdill (3C)")]);
+        let t = interconnector(&ic, "NSW1", &[0], 0, 1, &described);
+        assert!(t.contains("232 MW out of NSW"), "{t}");
+        assert!(t.contains("beyond it (the limit not met) in 1"), "{t}");
+        assert!(t.contains("requiring flow from NSW to Victoria"), "{t}");
+        assert!(t.contains("the flow was 215 MW past it at the peak"), "{t}");
+        assert!(
+            t.contains("N::N_CNSD_2 (\"Out = Canberra - Stockdill (3C)\")"),
+            "{t}"
+        );
     }
 }
