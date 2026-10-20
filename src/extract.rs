@@ -16,10 +16,10 @@ use arrow_array::{
 use chrono::Datelike;
 use chrono::{Duration, NaiveDateTime};
 use nem_lens_aemo::event::{
-    five_minute_settlement, fuel_of, interconnector_ends, is_outage_description, market_price_cap,
-    season, ConstraintSeries, Constraints, Dispatch, Headline, InterconnectorSeries,
-    Interconnectors, Notice, Notices, Rebid, RegionSeries, Series, Unavailability,
-    UnitAvailability, SCHEMA,
+    five_minute_settlement, fuel_of, interconnector_ends, is_dc_link, is_outage_description,
+    market_price_cap, season, ConstraintSeries, Constraints, Dispatch, Headline,
+    InterconnectorSeries, Interconnectors, Notice, Notices, Rebid, RegionSeries, Series,
+    Unavailability, UnitAvailability, SCHEMA,
 };
 use nem_lens_aemo::time::{iso_market, trading_day};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -326,6 +326,7 @@ pub fn build(dir: &Path) -> Result<PublicFiles> {
         demand: vec![None; n],
         available_generation: vec![None; n],
         net_interchange: vec![None; n],
+        ..RegionSeries::default()
     };
     for r in price.pricing() {
         let (Some(t), Some(reg)) = (
@@ -350,7 +351,7 @@ pub fn build(dir: &Path) -> Result<PublicFiles> {
             s.net_interchange[i] = sum.get(r, "NETINTERCHANGE").f();
         }
     }
-    let series = Series {
+    let mut series = Series {
         schema: SCHEMA,
         intervals: intervals.clone(),
         regions,
@@ -494,6 +495,9 @@ pub fn build(dir: &Path) -> Result<PublicFiles> {
     let ud = Tbl::read(&tdir.join("unit_dispatch.parquet"))?;
     let mut fuels_mw: BTreeMap<String, Vec<f64>> = BTreeMap::new();
     let mut avail: BTreeMap<String, Vec<Option<f64>>> = BTreeMap::new();
+    // Every region's generating units per interval, for the contingency
+    // reserve ratio, per (interval, region).
+    let mut generating: BTreeMap<(usize, &str), Vec<Element>> = BTreeMap::new();
     // The archive repeats some intervals' rows (re-published versions):
     // keep each unit's latest row per interval (LASTCHANGED). Ordered, so
     // the fuel sums below add up the same way every run.
@@ -514,6 +518,13 @@ pub fn build(dir: &Path) -> Result<PublicFiles> {
         let (Some(&i), Some(u)) = (idx.get(&t), info.get(duid)) else {
             continue;
         };
+        if matches!(u.dispatch_type.as_str(), "GENERATOR" | "BIDIRECTIONAL") {
+            generating.entry((i, u.region.as_str())).or_default().push((
+                duid,
+                ud.get(r, "AVAILABILITY").f().unwrap_or(0.0),
+                ud.get(r, "TOTALCLEARED").f().unwrap_or(0.0),
+            ));
+        }
         if u.region != m.region {
             continue;
         }
@@ -582,6 +593,45 @@ pub fn build(dir: &Path) -> Result<PublicFiles> {
         intervals: intervals.clone(),
         interconnectors: ics.into_values().collect(),
     };
+
+    // Contingency reserve ratio, every region (needs next-day unit data).
+    if !generating.is_empty() {
+        for (region, s) in series.regions.iter_mut() {
+            let (mut id, mut mw, mut reserve, mut crr) =
+                (vec![None; n], vec![None; n], vec![None; n], vec![None; n]);
+            for i in 0..n {
+                let Some(units) = generating.get(&(i, region.as_str())) else {
+                    continue;
+                };
+                let links: Vec<Element> = interconnectors
+                    .interconnectors
+                    .iter()
+                    .filter_map(|x| {
+                        let f = x.flow[i]?;
+                        let lo = x.import_limit[i];
+                        let hi = x.export_limit[i];
+                        if &x.to_region == region {
+                            Some((x.id.as_str(), f, hi.map_or(0.0, |h| (h - f).max(0.0))))
+                        } else if &x.from_region == region {
+                            Some((x.id.as_str(), -f, lo.map_or(0.0, |l| (f - l).max(0.0))))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if let Some(t) = largest_trip(units, &links) {
+                    id[i] = Some(t.id);
+                    mw[i] = Some(round(t.mw, 1));
+                    reserve[i] = Some(round(t.reserve, 1));
+                    crr[i] = Some(round(t.reserve / t.mw, 2));
+                }
+            }
+            s.contingency = id;
+            s.contingency_mw = mw;
+            s.reserve_mw = reserve;
+            s.crr = crr;
+        }
+    }
 
     // Binding constraints with AEMO's descriptions.
     let gc = Tbl::read(&tdir.join("static_gencondata.parquet"))?;
@@ -665,6 +715,45 @@ pub fn build(dir: &Path) -> Result<PublicFiles> {
         constraints,
         unavailability,
         notices,
+    })
+}
+
+/// A unit as (DUID, AVAILABILITY, TOTALCLEARED), or an interconnector as
+/// (ID, flow into the region, room to raise that flow to AEMO's limit).
+type Element<'a> = (&'a str, f64, f64);
+
+/// A region's largest single contingency in one interval, and the reserve
+/// left to replace it (see `RegionSeries::crr`).
+#[derive(Debug, PartialEq)]
+struct Trip {
+    id: String,
+    mw: f64,
+    reserve: f64,
+}
+
+/// `units`: the region's generating units as (DUID, AVAILABILITY,
+/// TOTALCLEARED); `links`: its interconnectors as (ID, flow into the region,
+/// room to raise that flow to AEMO's limit). The contingency is the largest
+/// unit output or DC-link inflow; the reserve is every unit's headroom plus
+/// every link's room, less the tripped element's own.
+fn largest_trip(units: &[Element], links: &[Element]) -> Option<Trip> {
+    let headroom = |avail: f64, cleared: f64| (avail - cleared).max(0.0);
+    let total: f64 = units.iter().map(|u| headroom(u.1, u.2)).sum::<f64>()
+        + links.iter().map(|l| l.2).sum::<f64>();
+    let candidates = units
+        .iter()
+        .map(|&(id, a, c)| (id, c, headroom(a, c)))
+        .chain(links.iter().filter(|l| is_dc_link(l.0)).copied());
+    let mut best: Option<(&str, f64, f64)> = None;
+    for (id, mw, own) in candidates {
+        if mw > 0.0 && best.is_none_or(|b| mw > b.1) {
+            best = Some((id, mw, own));
+        }
+    }
+    best.map(|(id, mw, own)| Trip {
+        id: id.to_string(),
+        mw,
+        reserve: total - own,
     })
 }
 
@@ -790,6 +879,29 @@ mod tests {
         assert_eq!(V::S(" 2.5 ".into()).f(), Some(2.5));
         assert_eq!(V::Null.f(), None);
         assert_eq!(V::S("x".into()).s(), Some("x"));
+    }
+
+    #[test]
+    fn largest_trip_is_a_unit_or_a_dc_link() {
+        // Unit A trips: B's 100 headroom plus 50 of import room; A's own
+        // 20 headroom is lost with it.
+        let units = [("A", 520.0, 500.0), ("B", 400.0, 300.0)];
+        let links = [("V-SA", 200.0, 50.0)];
+        let t = largest_trip(&units, &links).unwrap();
+        assert_eq!((t.id.as_str(), t.mw, t.reserve), ("A", 500.0, 150.0));
+        // An AC link is never the contingency, however large its inflow;
+        // a DC link is, and its own room goes with it.
+        let links = [("V-SA", 900.0, 50.0), ("T-V-MNSP1", 600.0, 30.0)];
+        let t = largest_trip(&units, &links).unwrap();
+        assert_eq!(
+            (t.id.as_str(), t.mw, t.reserve),
+            ("T-V-MNSP1", 600.0, 170.0)
+        );
+        // A charging battery (negative output) is not a contingency, but
+        // stopping its charge counts as headroom.
+        let t = largest_trip(&[("BAT", 100.0, -50.0), ("G", 80.0, 80.0)], &[]).unwrap();
+        assert_eq!((t.id.as_str(), t.mw, t.reserve), ("G", 80.0, 150.0));
+        assert_eq!(largest_trip(&[("G", 10.0, 0.0)], &[]), None);
     }
 
     #[test]

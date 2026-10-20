@@ -13,8 +13,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDateTime};
 use nem_lens_aemo::event::{
-    market_price_cap, Constraints, Dispatch, Headline, InterconnectorSeries, Interconnectors,
-    Notices, Series, Unavailability,
+    is_dc_link, market_price_cap, Constraints, Dispatch, Headline, InterconnectorSeries,
+    Interconnectors, Notices, Series, Unavailability,
 };
 use nem_lens_aemo::time::region_name;
 use serde::de::DeserializeOwned;
@@ -279,6 +279,51 @@ pub fn build(dir: &Path) -> Result<String> {
         } else {
             format!("Net interchange at the peak: exporting {}.", mw(x))
         });
+    }
+    // Contingency reserve ratio: plant and DC links only, not the network.
+    let crr = |i: usize| {
+        Some((
+            rs.contingency.get(i)?.as_deref()?,
+            get(&rs.contingency_mw, i)?,
+            get(&rs.reserve_mw, i)?,
+            get(&rs.crr, i)?,
+        ))
+    };
+    let trip = |(id, c, r, ratio): (&str, f64, f64, f64)| {
+        let what = if is_dc_link(id) {
+            format!("DC link {id} (its flow in)")
+        } else {
+            format!("unit {id}")
+        };
+        let gap = if r < c {
+            format!("{} short of it", mw(c - r))
+        } else {
+            format!("{} more than it", mw(r - c))
+        };
+        format!(
+            "largest single loss {what}, {}; reserve to replace it {} (other units' available headroom plus room to import), {gap}; ratio {ratio:.2}",
+            mw(c),
+            mw(r)
+        )
+    };
+    if let Some(x) = crr(peak) {
+        line(format!(
+            "Contingency reserve at the peak (plant and DC links only, not network outages): {}.",
+            trip(x)
+        ));
+    }
+    if let Some((i, x)) = span
+        .iter()
+        .filter_map(|&i| crr(i).map(|x| (i, x)))
+        .min_by(|a, b| a.1 .3.total_cmp(&b.1 .3))
+    {
+        if i != peak {
+            line(format!(
+                "Lowest contingency reserve ratio in the span, at {}: {}.",
+                hm(times[i]),
+                trip(x)
+            ));
+        }
     }
 
     let mut fuels: Vec<(&String, f64, f64)> = dispatch
