@@ -137,8 +137,8 @@ fn add_event(dir: &Path, lib: &Path) -> Result<Headline> {
     Ok(files.headline.public_view())
 }
 
-/// Rebuild index.json from every events/<id>/headline.json, newest first,
-/// and years/<YYYY>.json with each year's events.
+/// Rebuild index.json from every `events/<id>/headline.json`, newest first,
+/// and `years/<YYYY>.json` with each year's events.
 pub fn write_index(lib: &Path) -> Result<Index> {
     let mut events = Vec::new();
     let root = lib.join("events");

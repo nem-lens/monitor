@@ -52,11 +52,23 @@ jobs:
         with:
           path: monitor/target/release/nem-monitor
           key: nem-monitor-${{ runner.os }}-${{ hashFiles('monitor/Cargo.lock', 'monitor/src/**', 'monitor/static/**', 'aemo/Cargo.lock', 'aemo/src/**') }}
-      - if: steps.bin.outputs.cache-hit != 'true'
+      # API docs (rustdoc, private items included) are rebuilt only when the
+      # code changes, like the binary.
+      - id: docs
+        uses: actions/cache@v4
+        with:
+          path: monitor/target/doc
+          key: nem-monitor-doc-${{ runner.os }}-${{ hashFiles('monitor/Cargo.lock', 'monitor/src/**', 'aemo/Cargo.lock', 'aemo/src/**') }}
+      - if: steps.bin.outputs.cache-hit != 'true' || steps.docs.outputs.cache-hit != 'true'
         uses: dtolnay/rust-toolchain@stable
       - if: steps.bin.outputs.cache-hit != 'true'
         working-directory: monitor
         run: cargo build --release --locked
+      # CI checks the docs strictly; here a failure must not stop the site.
+      - if: steps.docs.outputs.cache-hit != 'true'
+        working-directory: monitor
+        continue-on-error: true
+        run: cargo doc --no-deps --document-private-items --locked
       - name: Configure
         working-directory: monitor
         env:
@@ -85,6 +97,12 @@ jobs:
             args+=(--replay fixture)
           fi
           ./target/release/nem-monitor -c pages.toml once "${args[@]}"
+      - name: Add the API docs at docs/
+        working-directory: monitor
+        run: |
+          [ -d target/doc/nem_monitor ] || exit 0
+          cp -r target/doc site/docs
+          echo '<!doctype html><meta http-equiv="refresh" content="0; url=nem_monitor/">' > site/docs/index.html
       - name: Post to GitHub Discussions
         if: vars.ALERTS_CATEGORY != ''
         working-directory: monitor

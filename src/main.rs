@@ -1,5 +1,11 @@
 //! nem-monitor: an always-on NEM event detector.
 //!
+//! This is the internal API reference, private items included; the
+//! [README](https://github.com/nem-lens/monitor#readme) covers running it.
+//! Shared NEMWeb parsing lives in
+//! [`nem_lens_aemo`](https://nem-lens.github.io/aemo/nem_lens_aemo/).
+//!
+//! ```text
 //!   nem-monitor -c config.toml serve            poll NEMWeb, detect, publish, serve the site
 //!   nem-monitor -c config.toml serve --offline  serve an existing database without polling
 //!   nem-monitor -c config.toml replay DIR       run the detector over saved DispatchIS files
@@ -10,6 +16,7 @@
 //!   nem-monitor store put BUNDLE --store DIR   copy a bundle into the private event store
 //!   nem-monitor library add RECORD --out LIB   publish an event's public view to the library
 //!   nem-monitor -c config.toml check-config
+//! ```
 
 mod app;
 mod bundle;
@@ -129,7 +136,7 @@ enum Cmd {
 #[derive(Subcommand)]
 enum HistoryCmd {
     /// Run the detector over archived months (DISPATCHPRICE and
-    /// DISPATCHREGIONSUM under ROOT/<YYYY_MM>/<TABLE>/) and write every
+    /// DISPATCHREGIONSUM under ROOT/YYYY_MM/TABLE/) and write every
     /// closed high-price event as JSON.
     Scan {
         #[arg(long, value_name = "DIR")]
@@ -176,7 +183,7 @@ enum LibraryCmd {
     /// and rebuild its index. Every file passes the event schema's public
     /// gate first.
     Add {
-        /// A bundle (bundles/<id>) or a record in the private store (STORE/<id>).
+        /// A bundle (bundles/ID) or a record in the private store (STORE/ID).
         record: PathBuf,
         /// The library directory (a checkout of nem-lens/library).
         #[arg(long, value_name = "DIR")]
@@ -193,14 +200,14 @@ enum LibraryCmd {
     /// Print an event's fact sheet: the facts an account of it may use,
     /// from its public library files only.
     Facts {
-        /// The event's folder in the library (LIB/events/<id>).
+        /// The event's folder in the library (LIB/events/ID).
         event: PathBuf,
     },
     /// Check an account of an event against its fact sheet: every number,
     /// time, unit and constraint in it must appear in the sheet. Exits
     /// non-zero, listing them, if any does not.
     CheckAccount {
-        /// The event's folder in the library (LIB/events/<id>).
+        /// The event's folder in the library (LIB/events/ID).
         event: PathBuf,
         /// The account, as plain text.
         account: PathBuf,
@@ -209,7 +216,7 @@ enum LibraryCmd {
 
 #[derive(Subcommand)]
 enum StoreCmd {
-    /// Copy a bundle's AEMO files into the private store as STORE/<id>/.
+    /// Copy a bundle's AEMO files into the private store as STORE/ID/.
     Put {
         bundle: PathBuf,
         /// The store directory (a checkout of nem-lens/events).
@@ -228,7 +235,7 @@ enum StoreCmd {
 #[derive(Subcommand)]
 enum BundleCmd {
     /// Add MMSDM equations for every invoked constraint version, and unit
-    /// details, from a local tree laid out as MMSDM/<YYYY_MM>/<TABLE>/*.CSV.
+    /// details, from a local tree laid out as MMSDM/YYYY_MM/TABLE/*.CSV.
     AddStatic {
         /// The bundle directory, e.g. bundles/202610121420-NSW1-high.
         dir: PathBuf,
@@ -613,7 +620,7 @@ async fn main() -> Result<()> {
 }
 
 /// Next-day zips in `dir` for the configured sources, as (source, trading
-/// day, absolute path). A source's files are named PUBLIC_<SOURCE>_<YYYYMMDD>_….
+/// day, absolute path). A source's files are named `PUBLIC_<SOURCE>_<YYYYMMDD>_…`.
 fn local_daily_files(
     dir: &std::path::Path,
     sources: &[String],

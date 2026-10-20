@@ -4,7 +4,7 @@
 //! resolve to public IP addresses (no internal network access), redirects are
 //! not followed, the receiver must echo a challenge, registrations are rate
 //! limited per IP, and endpoints that keep failing are disabled. Deliveries are
-//! signed with HMAC-SHA256 over "<timestamp>.<body>".
+//! signed with HMAC-SHA256 over `"<timestamp>.<body>"`.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
