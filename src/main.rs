@@ -32,6 +32,7 @@ mod model;
 mod nemweb;
 mod notify;
 mod record;
+mod restore;
 mod site;
 mod slim;
 mod store;
@@ -230,6 +231,17 @@ enum StoreCmd {
         store: PathBuf,
         ids: Vec<String>,
     },
+    /// Rebuild the day offers of records slimmed before FCAS offers were
+    /// kept, from the MMSDM archive they were built from, and slim them
+    /// again (all records, or the events named).
+    RestoreOffers {
+        #[arg(long, value_name = "DIR")]
+        store: PathBuf,
+        /// The MMSDM archive tree (ROOT/YYYY_MM/TABLE/).
+        #[arg(long, value_name = "DIR")]
+        root: PathBuf,
+        ids: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -406,7 +418,7 @@ async fn main() -> Result<()> {
             }
             if s.missing_equations.len() > 10 {
                 println!(
-                    "  … and {} more (see manifest.json)",
+                    "  â€¦ and {} more (see manifest.json)",
                     s.missing_equations.len() - 10
                 );
             }
@@ -447,6 +459,30 @@ async fn main() -> Result<()> {
                     .fold((0, 0), |(b, a), t| (b + t.rows_before, a + t.rows_after));
                 println!("{id}: {before} -> {after} rows");
             }
+            Ok(())
+        }
+        Cmd::Store {
+            cmd: StoreCmd::RestoreOffers { store, root, ids },
+        } => {
+            let ids = if ids.is_empty() {
+                record::ids(&store)?
+            } else {
+                ids
+            };
+            let mut failed = 0;
+            for id in &ids {
+                match restore::restore(&store.join(id), &root) {
+                    Ok(restore::Restored::Done { before, after }) => {
+                        println!("{id}: day offers {before} -> {after} rows")
+                    }
+                    Ok(restore::Restored::Skipped(why)) => println!("{id}: skipped, {why}"),
+                    Err(e) => {
+                        failed += 1;
+                        println!("{id}: failed, {e:#}");
+                    }
+                }
+            }
+            anyhow::ensure!(failed == 0, "{failed} records failed");
             Ok(())
         }
         Cmd::Library {
@@ -620,7 +656,7 @@ async fn main() -> Result<()> {
 }
 
 /// Next-day zips in `dir` for the configured sources, as (source, trading
-/// day, absolute path). A source's files are named `PUBLIC_<SOURCE>_<YYYYMMDD>_…`.
+/// day, absolute path). A source's files are named `PUBLIC_<SOURCE>_<YYYYMMDD>_â€¦`.
 fn local_daily_files(
     dir: &std::path::Path,
     sources: &[String],

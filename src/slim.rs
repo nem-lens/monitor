@@ -4,10 +4,12 @@
 //! more than any reader looks at (19 Oct 2026, about 60% of the store):
 //!
 //! - `bids_dayoffer`: every rebid of the trading day, for every unit and
-//!   service. nemcf reads ENERGY offers only, and for each interval the
-//!   latest version submitted at or before its cutoff (the OFFERTRK offer
-//!   time, else the interval end). The public files read the last five
-//!   distinct ENERGY rebid reasons per unit up to the window end.
+//!   service. nemcf reads, for each interval, the latest ENERGY version
+//!   submitted at or before its cutoff (the OFFERTRK offer time, else the
+//!   interval end), and for FCAS the versions the period offers name
+//!   (BIDPEROFFER_D holds the one in force each period). The public files
+//!   read the last five distinct ENERGY rebid reasons per unit up to the
+//!   window end.
 //! - the constraint equation tables: every version of each invoked
 //!   constraint back to 2016. nemcf resolves each invoked version once, to
 //!   that version or, when it is missing or has no usable header, the
@@ -263,6 +265,31 @@ fn offer_rows(
     }
 
     let mut keep = HashSet::new();
+    // nemcf's FCAS: the day offers whose versions the period offers name.
+    // BIDPEROFFER_D holds the version in force in each period, so these are
+    // exactly the price bands that go with the record's FCAS quantities.
+    let fcas_versions = period_versions(tdir)?;
+    if !fcas_versions.is_empty() {
+        let mut i = 0;
+        for b in read_batches(&tdir.join(DAY_OFFER))? {
+            let duid = strings(&b, "DUID");
+            let kind = strings(&b, "BIDTYPE");
+            let day = millis(&b, "SETTLEMENTDATE");
+            let at = millis(&b, "OFFERDATE");
+            let dir = strings(&b, "DIRECTION");
+            for k in 0..b.num_rows() {
+                if let (Some(d), Some(s), Some(day), Some(at)) = (&duid[k], &kind[k], day[k], at[k])
+                {
+                    if s != "ENERGY"
+                        && fcas_versions.contains(&(d.clone(), s.clone(), day, dir[k].clone(), at))
+                    {
+                        keep.insert(i + k);
+                    }
+                }
+            }
+            i += b.num_rows();
+        }
+    }
     // nemcf: per (unit, trading day, direction), versions from the latest
     // at or before the unit's earliest cutoff to the window end.
     let mut floor: HashMap<(&str, i64, Option<&str>), i64> = HashMap::new();
@@ -320,6 +347,42 @@ fn offer_rows(
         keep.extend(list[from..].iter().map(|x| x.2));
     }
     Ok(keep)
+}
+
+/// (DUID, BIDTYPE, trading day ms, DIRECTION, OFFERDATE ms) of every FCAS
+/// version the period offers name.
+pub(crate) type OfferVersion = (String, String, i64, Option<String>, i64);
+
+pub(crate) fn period_versions(tdir: &Path) -> Result<HashSet<OfferVersion>> {
+    let mut out = HashSet::new();
+    let path = tdir.join("bids_offerperiod.parquet");
+    if !path.exists() {
+        return Ok(out);
+    }
+    // Before 5-minute settlement (Oct 2021) BIDPEROFFER_D named these
+    // TRADINGDATE and OFFERDATETIME, as aemo's parser reads them.
+    let either = |b: &RecordBatch, a: &str, c: &str| {
+        if b.column_by_name(a).is_some() {
+            millis(b, a)
+        } else {
+            millis(b, c)
+        }
+    };
+    for b in read_batches(&path)? {
+        let duid = strings(&b, "DUID");
+        let kind = strings(&b, "BIDTYPE");
+        let day = either(&b, "TRADINGDATE", "SETTLEMENTDATE");
+        let at = either(&b, "OFFERDATETIME", "OFFERDATE");
+        let dir = strings(&b, "DIRECTION");
+        for i in 0..b.num_rows() {
+            if let (Some(d), Some(s), Some(day), Some(at)) = (&duid[i], &kind[i], day[i], at[i]) {
+                if s != "ENERGY" {
+                    out.insert((d.clone(), s.clone(), day, dir[i].clone(), at));
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Rewrite a Parquet file keeping the rows `mask` selects, batch by batch.
@@ -619,6 +682,71 @@ mod tests {
                 "08:00", "09:00"
             ]
         );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn fcas_offers_keep_the_versions_the_period_offers_name() {
+        let dir = record();
+        let b = dir.join("bundle");
+        let day = "2026/10/12 00:00:00";
+        write(
+            &b,
+            DAY_OFFER,
+            &["DUID", "BIDTYPE", "SETTLEMENTDATE", "OFFERDATE"],
+            &[
+                &["U1", "RAISE6SEC", day, "2026/10/12 03:00:00"], // named
+                &["U1", "RAISE6SEC", day, "2026/10/12 05:00:00"], // not named
+                &["U1", "LOWERREG", day, "2026/07/01 09:00:00"],  // a standing offer, named
+                &["U1", "LOWERREG", day, "2026/10/12 03:00:00"],  // another service's time
+            ],
+        );
+        write(
+            &b,
+            "bids_offerperiod.parquet",
+            &["DUID", "BIDTYPE", "SETTLEMENTDATE", "OFFERDATE", "PERIODID"],
+            &[
+                &["U1", "RAISE6SEC", day, "2026/10/12 03:00:00", "72"],
+                &["U1", "RAISE6SEC", day, "2026/10/12 03:00:00", "73"],
+                &["U1", "LOWERREG", day, "2026/07/01 09:00:00", "72"],
+            ],
+        );
+        slim(&dir).unwrap();
+        assert_eq!(column(&b, DAY_OFFER, "BIDTYPE"), ["RAISE6SEC", "LOWERREG"]);
+        assert_eq!(column(&b, DAY_OFFER, "OFFERDATE"), ["03:00", "09:00"]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn fcas_versions_read_pre_5ms_period_columns() {
+        // Before Oct 2021 BIDPEROFFER_D names the day and version
+        // TRADINGDATE and OFFERDATETIME.
+        let dir = record();
+        let b = dir.join("bundle");
+        let day = "2020/11/17 00:00:00";
+        write(
+            &b,
+            DAY_OFFER,
+            &["DUID", "BIDTYPE", "SETTLEMENTDATE", "OFFERDATE"],
+            &[
+                &["U1", "RAISE6SEC", day, "2020/11/16 14:54:16"],
+                &["U1", "RAISE6SEC", day, "2020/11/17 01:00:00"],
+            ],
+        );
+        write(
+            &b,
+            "bids_offerperiod.parquet",
+            &[
+                "DUID",
+                "BIDTYPE",
+                "TRADINGDATE",
+                "OFFERDATETIME",
+                "PERIODID",
+            ],
+            &[&["U1", "RAISE6SEC", day, "2020/11/16 14:54:16", "20"]],
+        );
+        slim(&dir).unwrap();
+        assert_eq!(column(&b, DAY_OFFER, "OFFERDATE"), ["14:54"]);
         fs::remove_dir_all(&dir).unwrap();
     }
 }

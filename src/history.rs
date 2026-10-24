@@ -339,10 +339,11 @@ impl Job {
     }
 }
 
-fn mmsdm_url(month: &str, file: &str) -> String {
-    let (y, m) = month.split_at(4);
+/// The NEMWeb URL of an archive file, for a month given as YYYY_MM.
+pub(crate) fn mmsdm_url(month: &str, file: &str) -> String {
+    let y = &month[..4];
     format!(
-        "{MMSDM_URL}/{y}/MMSDM_{y}_{m}/MMSDM_Historical_Data_SQLLoader/DATA/{}",
+        "{MMSDM_URL}/{y}/MMSDM_{month}/MMSDM_Historical_Data_SQLLoader/DATA/{}",
         file.replace('#', "%23")
     )
 }
@@ -548,6 +549,15 @@ pub fn build_bundles(root: &Path, events: &[Event], bundles: &Path) -> Result<Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_urls_name_the_month_folder() {
+        assert_eq!(
+            mmsdm_url("2025_10", "PUBLIC_ARCHIVE#BIDDAYOFFER#FILE01#202510010000.zip"),
+            "https://nemweb.com.au/Data_Archive/Wholesale_Electricity/MMSDM/2025/MMSDM_2025_10/\
+             MMSDM_Historical_Data_SQLLoader/DATA/PUBLIC_ARCHIVE%23BIDDAYOFFER%23FILE01%23202510010000.zip"
+        );
+    }
 
     #[test]
     fn months_are_inclusive() {

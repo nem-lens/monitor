@@ -297,19 +297,68 @@ impl TableBuf {
         Ok(RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)?)
     }
 
+    /// An Arrow batch with `schema`'s columns and types, as an existing file
+    /// has them, rather than inferred. Columns the buffer lacks are null.
+    pub fn to_batch_as(&self, schema: &Schema) -> Result<RecordBatch> {
+        let mut arrays: Vec<ArrayRef> = Vec::new();
+        for f in schema.fields() {
+            let i = self.index.get(f.name()).copied();
+            let vals = || {
+                (0..self.rows.len()).map(move |r| {
+                    i.and_then(|i| self.rows[r].get(i))
+                        .and_then(|v| v.as_deref())
+                })
+            };
+            let arr: ArrayRef = match f.data_type() {
+                DataType::Int64 => Arc::new(
+                    vals()
+                        .map(|v| v.and_then(|s| s.parse::<i64>().ok()))
+                        .collect::<Int64Array>(),
+                ),
+                DataType::Float64 => Arc::new(
+                    vals()
+                        .map(|v| v.and_then(|s| s.parse::<f64>().ok()))
+                        .collect::<Float64Array>(),
+                ),
+                DataType::Timestamp(TimeUnit::Millisecond, None) => Arc::new(
+                    vals()
+                        .map(|v| {
+                            v.and_then(parse_market)
+                                .map(|t| t.and_utc().timestamp_millis())
+                        })
+                        .collect::<TimestampMillisecondArray>(),
+                ),
+                DataType::Utf8 => Arc::new(vals().collect::<StringArray>()),
+                other => anyhow::bail!("column {} has unexpected type {other}", f.name()),
+            };
+            arrays.push(arr);
+        }
+        Ok(RecordBatch::try_new(Arc::new(schema.clone()), arrays)?)
+    }
+
     /// Write as Parquet; returns the file's SHA-256.
     pub fn write_parquet(&self, path: &Path) -> Result<String> {
         let batch = self.to_batch()?;
-        let props = WriterProperties::builder()
-            .set_compression(Compression::SNAPPY)
-            .build();
-        let mut buf = Vec::new();
-        let mut w = ArrowWriter::try_new(&mut buf, batch.schema(), Some(props))?;
-        w.write(&batch)?;
-        w.close()?;
-        fs::write(path, &buf).with_context(|| format!("writing {}", path.display()))?;
-        Ok(sha256_hex(&buf))
+        write_batch(path, &batch)
     }
+
+    /// [`Self::write_parquet`] with `schema`'s columns and types.
+    pub fn write_parquet_as(&self, path: &Path, schema: &Schema) -> Result<String> {
+        let batch = self.to_batch_as(schema)?;
+        write_batch(path, &batch)
+    }
+}
+
+fn write_batch(path: &Path, batch: &RecordBatch) -> Result<String> {
+    let props = WriterProperties::builder()
+        .set_compression(Compression::SNAPPY)
+        .build();
+    let mut buf = Vec::new();
+    let mut w = ArrowWriter::try_new(&mut buf, batch.schema(), Some(props))?;
+    w.write(batch)?;
+    w.close()?;
+    fs::write(path, &buf).with_context(|| format!("writing {}", path.display()))?;
+    Ok(sha256_hex(&buf))
 }
 
 /// AEMO columns that are identifiers, run numbers, flags or period indexes:
