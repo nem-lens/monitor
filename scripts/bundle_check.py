@@ -73,7 +73,7 @@ def main():
             FROM '{price}'
             WHERE REGIONID = '{m['region']}' AND INTERVENTION = 0
               AND SETTLEMENTDATE BETWEEN TIMESTAMP '{start}' AND TIMESTAMP '{end}'
-        """).fetchone()
+        """).fetchall()[0]
         print(f"duckdb: {m['region']} peak {peak}, {above} intervals >= {a.high:g}, {intervals} intervals in window")
         if a.expect_peak is not None and peak != a.expect_peak:
             failures.append(f"peak {peak} != {a.expect_peak}")
@@ -81,7 +81,7 @@ def main():
             failures.append(f"intervals above {above} != {a.expect_above}")
         for f in ("bids_offerperiod.parquet", "unit_dispatch.parquet", "offer_trk.parquet"):
             if (d / f).exists():
-                n = duckdb.sql(f"SELECT count(*) FROM '{(d / f).as_posix()}'").fetchone()[0]
+                n = duckdb.sql(f"SELECT count(*) FROM '{(d / f).as_posix()}'").fetchall()[0][0]
                 print(f"duckdb: {f} {n} rows")
 
     for f in failures:
