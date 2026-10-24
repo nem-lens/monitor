@@ -7,7 +7,7 @@
 //! LIB/index.json                        every event's headline, newest first
 //! LIB/events/<id>/headline.json         AEMO headline figures over the event span
 //! LIB/events/<id>/manifest.json         AEMO sources and SHA-256
-//! LIB/events/<id>/series.json           regional price, demand, availability, interchange
+//! LIB/events/<id>/series.json           regional price, demand, availability, interchange, FCAS
 //! LIB/events/<id>/dispatch.json         dispatch by fuel in the event region
 //! LIB/events/<id>/interconnectors.json  flows, AEMO limits and what set them
 //! LIB/events/<id>/constraints.json      binding constraints, AEMO marginal values
@@ -42,8 +42,8 @@ by `nem-monitor library add`; do not edit by hand.
   $5,000/MWh, cost to load (price x demand) and maximum demand over the
   event span.
 - `events/<id>/series.json`: each region's price, demand, available
-  generation and net interchange per interval, and its contingency reserve
-  ratio (below).
+  generation and net interchange per interval, its contingency reserve
+  ratio (below), and its FCAS prices and MW enabled by service.
 - `events/<id>/dispatch.json`: dispatch by fuel in the event region.
 - `events/<id>/interconnectors.json`: flows, AEMO's limits and the
   constraints that set them.

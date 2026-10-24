@@ -19,7 +19,7 @@ use nem_lens_aemo::event::{
     five_minute_settlement, fuel_of, interconnector_ends, is_dc_link, is_outage_description,
     market_price_cap, season, ConstraintSeries, Constraints, Dispatch, Headline,
     InterconnectorSeries, Interconnectors, Notice, Notices, Rebid, RegionSeries, Series,
-    Unavailability, UnitAvailability, SCHEMA,
+    Unavailability, UnitAvailability, FCAS_SERVICES, SCHEMA,
 };
 use nem_lens_aemo::time::{iso_market, trading_day};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -336,7 +336,15 @@ pub fn build(dir: &Path) -> Result<PublicFiles> {
             continue;
         };
         if let Some(&i) = idx.get(&t) {
-            regions.entry(reg.to_string()).or_insert_with(blank).price[i] = price.get(r, "RRP").f();
+            let s = regions.entry(reg.to_string()).or_insert_with(blank);
+            s.price[i] = price.get(r, "RRP").f();
+            for svc in FCAS_SERVICES {
+                if let Some(x) = price.get(r, &format!("{svc}RRP")).f() {
+                    s.fcas_price
+                        .entry(svc.to_string())
+                        .or_insert_with(|| vec![None; n])[i] = Some(x);
+                }
+            }
         }
     }
     for r in sum.pricing() {
@@ -349,6 +357,17 @@ pub fn build(dir: &Path) -> Result<PublicFiles> {
             s.demand[i] = sum.get(r, "TOTALDEMAND").f();
             s.available_generation[i] = sum.get(r, "AVAILABLEGENERATION").f();
             s.net_interchange[i] = sum.get(r, "NETINTERCHANGE").f();
+            // Enablement only for the services AEMO priced.
+            for svc in FCAS_SERVICES {
+                if !s.fcas_price.contains_key(svc) {
+                    continue;
+                }
+                if let Some(x) = sum.get(r, &format!("{svc}LOCALDISPATCH")).f() {
+                    s.fcas_enabled
+                        .entry(svc.to_string())
+                        .or_insert_with(|| vec![None; n])[i] = Some(x);
+                }
+            }
         }
     }
     let mut series = Series {
