@@ -1,11 +1,15 @@
-//! Restore the FCAS day offers to records slimmed before slimming kept them.
+//! Restore the day offers that records' period offers name but lack.
 //!
 //! Until 24 Oct 2026, `store slim` kept ENERGY day offers only, so a
-//! record's FCAS period offers (quantities) had no price bands. This
-//! rebuilds `bids_dayoffer` from the same archive files the record was
-//! built from, exactly as `history build` slices it, and slims it again:
-//! the ENERGY rows come back as they were, and the FCAS versions the
-//! period offers name are kept as well.
+//! record's FCAS period offers (quantities) had no price bands. And
+//! `history build` takes day offers whose SETTLEMENTDATE is a trading day
+//! of the window, so a standing offer submitted earlier (WRWF1's of
+//! 2 Aug 2018, in force on 30 Jan 2020) has period rows but no prices, and
+//! nemcf holds the unit at AEMO's target. This rebuilds `bids_dayoffer`
+//! from the same archive files the record was built from, exactly as
+//! `history build` slices it, adds the versions the period offers name
+//! from BIDDAYOFFER_D, which lists standing offers under each trading day,
+//! and slims it again.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -116,9 +120,9 @@ pub fn restore(dir: &Path, root: &Path) -> Result<Restored> {
 
     // Standing offers, submitted before the trading day, are in force in
     // BIDPEROFFER_D but have no BIDDAYOFFER row for the day; BIDDAYOFFER_D
-    // has them. Add the FCAS versions the period offers name that are still
-    // missing (ENERGY is left as the record had it).
-    let wanted = crate::slim::period_versions(&tdir)?;
+    // has them. Add the versions the period offers name that are still
+    // missing.
+    let wanted = crate::slim::all_period_versions(&tdir)?;
     let key = |r: &nem_lens_aemo::Record| -> Option<crate::slim::OfferVersion> {
         let ms = |c: &str| Some(parse_market(r.text(c)?)?.and_utc().timestamp_millis());
         Some((
@@ -154,7 +158,7 @@ pub fn restore(dir: &Path, root: &Path) -> Result<Restored> {
                     return Ok(());
                 }
                 if let Some(k) = key(r) {
-                    if k.1 != "ENERGY" && wanted.contains(&k) && have.insert(k) {
+                    if wanted.contains(&k) && have.insert(k) {
                         hit = true;
                         buf.add(&nem_lens_aemo::Table {
                             columns: r.header.columns.clone(),

@@ -349,11 +349,20 @@ fn offer_rows(
     Ok(keep)
 }
 
-/// (DUID, BIDTYPE, trading day ms, DIRECTION, OFFERDATE ms) of every FCAS
-/// version the period offers name.
+/// (DUID, BIDTYPE, trading day ms, DIRECTION, OFFERDATE ms) of a version
+/// the period offers name.
 pub(crate) type OfferVersion = (String, String, i64, Option<String>, i64);
 
+/// Every FCAS version the period offers name.
 pub(crate) fn period_versions(tdir: &Path) -> Result<HashSet<OfferVersion>> {
+    Ok(all_period_versions(tdir)?
+        .into_iter()
+        .filter(|v| v.1 != "ENERGY")
+        .collect())
+}
+
+/// Every version, ENERGY and FCAS, the period offers name.
+pub(crate) fn all_period_versions(tdir: &Path) -> Result<HashSet<OfferVersion>> {
     let mut out = HashSet::new();
     let path = tdir.join("bids_offerperiod.parquet");
     if !path.exists() {
@@ -376,9 +385,7 @@ pub(crate) fn period_versions(tdir: &Path) -> Result<HashSet<OfferVersion>> {
         let dir = strings(&b, "DIRECTION");
         for i in 0..b.num_rows() {
             if let (Some(d), Some(s), Some(day), Some(at)) = (&duid[i], &kind[i], day[i], at[i]) {
-                if s != "ENERGY" {
-                    out.insert((d.clone(), s.clone(), day, dir[i].clone(), at));
-                }
+                out.insert((d.clone(), s.clone(), day, dir[i].clone(), at));
             }
         }
     }

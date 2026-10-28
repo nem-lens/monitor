@@ -28,6 +28,7 @@ mod feeds;
 mod history;
 mod ingest;
 mod library;
+mod mnsp;
 mod model;
 mod nemweb;
 mod notify;
@@ -235,6 +236,16 @@ enum StoreCmd {
     /// kept, from the MMSDM archive they were built from, and slim them
     /// again (all records, or the events named).
     RestoreOffers {
+        #[arg(long, value_name = "DIR")]
+        store: PathBuf,
+        /// The MMSDM archive tree (ROOT/YYYY_MM/TABLE/).
+        #[arg(long, value_name = "DIR")]
+        root: PathBuf,
+        ids: Vec<String>,
+    },
+    /// Add MNSP (Basslink) offers and links to records, from the MMSDM
+    /// archive (all records, or the events named).
+    AddMnsp {
         #[arg(long, value_name = "DIR")]
         store: PathBuf,
         /// The MMSDM archive tree (ROOT/YYYY_MM/TABLE/).
@@ -462,6 +473,34 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Store {
+            cmd: StoreCmd::AddMnsp { store, root, ids },
+        } => {
+            let ids = if ids.is_empty() {
+                record::ids(&store)?
+            } else {
+                ids
+            };
+            let mut failed = 0;
+            for id in &ids {
+                match mnsp::add(&store.join(id), &root) {
+                    Ok(mnsp::Added::Done {
+                        links,
+                        periods,
+                        days,
+                    }) => println!(
+                        "{id}: MNSP links {links}, period offers {periods}, day offers {days} rows"
+                    ),
+                    Ok(mnsp::Added::Skipped(why)) => println!("{id}: skipped, {why}"),
+                    Err(e) => {
+                        failed += 1;
+                        println!("{id}: failed, {e:#}");
+                    }
+                }
+            }
+            anyhow::ensure!(failed == 0, "{failed} records failed");
+            Ok(())
+        }
+        Cmd::Store {
             cmd: StoreCmd::RestoreOffers { store, root, ids },
         } => {
             let ids = if ids.is_empty() {
@@ -585,10 +624,21 @@ async fn main() -> Result<()> {
                 .collect();
             println!("building {} events", chosen.len());
             let dirs = history::build_bundles(&root, &chosen, &bundles)?;
-            let mmsdm = mmsdm.unwrap_or(root);
+            let mmsdm = mmsdm.unwrap_or_else(|| root.clone());
             for dir in dirs {
                 bundle::add_static(&dir, &mmsdm)?;
                 let rec = record::put(&dir, &store)?;
+                // Standing offers in force but submitted for an earlier day
+                // are in BIDDAYOFFER_D only; the slice above misses them.
+                if let restore::Restored::Done { before, after } = restore::restore(&rec, &root)? {
+                    if after != before {
+                        println!("{}: day offers {before} -> {after} rows", dir.display());
+                    }
+                }
+                // Basslink's offers cap and price its flow.
+                if let mnsp::Added::Skipped(why) = mnsp::add(&rec, &root)? {
+                    println!("{}: no MNSP offers, {why}", dir.display());
+                }
                 let h = library::add(&rec, &lib)?;
                 println!(
                     "{}: peak ${:.0} at {}, mean ${:.0}, {} intervals >= $5,000",
